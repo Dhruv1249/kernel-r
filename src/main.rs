@@ -5,6 +5,7 @@
 // We won't be able to use the standard library in this case.
 // That's why disabling it here.
 #![no_std]
+// Also just learned #! -> for whole crate and only # -> for module directly below it!
 
 // We think rust starts with main, but in reality its entry point is a _start functions which
 // sets up the stacks, heap, backtrace for panics etc but all of it is provided in the stdlib
@@ -20,4 +21,16 @@ fn panic(_info: &PanicInfo) -> ! {
     loop {}
 }
 
-fn main() {}
+
+// Using no_mangle to disable name mangling.
+// Usually whenever rust compiles it gives each functions its own uniquely generated
+// cryptic id to differentiate it from all functions (it helps in overloading).
+// But in our case _start is the entry point for program and we always want it to have same
+// name.
+#[unsafe( no_mangle )]
+// extern "C" tells rust to call the functions just like C since bootloader expects
+// functions to be called specifically like C like register/stack positions and we want
+// stability.
+pub extern "C" fn _start() -> !{
+    loop{}
+}
