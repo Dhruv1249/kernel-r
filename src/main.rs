@@ -12,6 +12,18 @@
 // so we will override the entry point.
 #![no_main]
 
+// Multiboot2 header — GRUB looks for this magic number
+#[used]
+#[unsafe(link_section = ".multiboot2")]
+static MULTIBOOT2_HEADER: [u32; 4] = [
+    0xe85250d6,                                          // magic
+    0,                                                   // architecture (i386 protected mode)
+    16,                                                  // header length
+    (0xe85250d6_u32.wrapping_add(0).wrapping_add(16)).wrapping_neg(),
+];
+
+
+
 use core::panic::PanicInfo;
 
 // Defining a panic handler allows us to take care of the error gracefully.
@@ -28,9 +40,23 @@ fn panic(_info: &PanicInfo) -> ! {
 // But in our case _start is the entry point for program and we always want it to have same
 // name.
 #[unsafe( no_mangle )]
+
+
+static HELLO: &[u8] = b"Hello world!"; 
+
 // extern "C" tells rust to call the functions just like C since bootloader expects
 // functions to be called specifically like C like register/stack positions and we want
 // stability.
 pub extern "C" fn _start() -> !{
+    
+    let vga_buffer = 0xb8000 as *mut u8;
+
+    for (i,&byte) in HELLO.iter().enumerate() {
+        unsafe{
+            *vga_buffer.offset(i as isize * 2) = byte;
+            *vga_buffer.offset(i as isize * 2+1) = 0xb;
+        }
+    }
+
     loop{}
 }
