@@ -32,13 +32,26 @@ fn panic(_info: &PanicInfo) -> ! {
 
 
 
+
 static HELLO: &[u8] = b"Hello world!"; 
+
+fn clear_screen(){
+    let vga_buffer = 0xb8000 as *mut u8;
+    for i in 0..80*25{
+        unsafe{
+            *vga_buffer.offset(i as isize *2) = 0x20;
+            *vga_buffer.offset(i as isize *2 +1) = 0x07;
+        }
+    }
+}
+
 #[unsafe( no_mangle )]
 // extern "C" tells rust to call the functions just like C since bootloader expects
 // functions to be called specifically like C like register/stack positions and we want
 // stability.
 pub extern "C" fn _start() -> !{
     
+    clear_screen();
     let vga_buffer = 0xb8000 as *mut u8;
 
     for (i,&byte) in HELLO.iter().enumerate() {
