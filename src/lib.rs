@@ -12,16 +12,6 @@
 // so we will override the entry point.
 #![no_main]
 
-// Multiboot2 header — GRUB looks for this magic number
-#[used]
-#[unsafe(link_section = ".multiboot2")]
-static MULTIBOOT2_HEADER: [u32; 4] = [
-    0xe85250d6,                                          // magic
-    0,                                                   // architecture (i386 protected mode)
-    16,                                                  // header length
-    (0xe85250d6_u32.wrapping_add(0).wrapping_add(16)).wrapping_neg(),
-];
-
 
 
 use core::panic::PanicInfo;
@@ -39,11 +29,11 @@ fn panic(_info: &PanicInfo) -> ! {
 // cryptic id to differentiate it from all functions (it helps in overloading).
 // But in our case _start is the entry point for program and we always want it to have same
 // name.
-#[unsafe( no_mangle )]
+
 
 
 static HELLO: &[u8] = b"Hello world!"; 
-
+#[unsafe( no_mangle )]
 // extern "C" tells rust to call the functions just like C since bootloader expects
 // functions to be called specifically like C like register/stack positions and we want
 // stability.

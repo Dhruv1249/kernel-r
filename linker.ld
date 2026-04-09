@@ -1,4 +1,4 @@
-ENTRY(_start)
+ENTRY(start)
 
 SECTIONS {
     . = 1M;
@@ -10,6 +10,21 @@ SECTIONS {
 
     .text :
     {
-        *(.text)
+        *(.text .text.*)
+    }
+
+    .rodata :
+    {
+        *(.rodata .rodata.*)
+    }
+
+    .data :
+    {
+        *(.data .data.*)
+    }
+
+    .bss :
+    {
+        *(.bss .bss.*)
     }
 }

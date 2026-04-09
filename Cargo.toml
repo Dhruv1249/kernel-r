@@ -12,9 +12,6 @@ panic = "abort"
 [profile.release]
 panic = "abort"
 
-# Fix for rust analyzer showing error on panic handler
-# Also double [[]] since bin can show up mutliple times
-[[bin]]
-name = "kernel-r"
-test = false
-bench = false
+[lib]
+name = "kernel_r"
+crate-type = ["staticlib"]
