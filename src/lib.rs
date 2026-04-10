@@ -12,8 +12,8 @@
 // so we will override the entry point.
 #![no_main]
 
-
-
+// Importing vga buffer library to print on screen.
+mod vga_buffer;
 use core::panic::PanicInfo;
 
 // Defining a panic handler allows us to take care of the error gracefully.
@@ -33,7 +33,6 @@ fn panic(_info: &PanicInfo) -> ! {
 
 
 
-static HELLO: &[u8] = b"Hello world!"; 
 
 fn clear_screen(){
     let vga_buffer = 0xb8000 as *mut u8;
@@ -52,14 +51,6 @@ fn clear_screen(){
 pub extern "C" fn _start() -> !{
     
     clear_screen();
-    let vga_buffer = 0xb8000 as *mut u8;
-
-    for (i,&byte) in HELLO.iter().enumerate() {
-        unsafe{
-            *vga_buffer.offset(i as isize * 2) = byte;
-            *vga_buffer.offset(i as isize * 2+1) = 0xb;
-        }
-    }
-
+    vga_buffer::print_something();
     loop{}
 }
