@@ -19,7 +19,8 @@ use core::panic::PanicInfo;
 // Defining a panic handler allows us to take care of the error gracefully.
 // Again without std, we will have to define a panic handler otherwise it won't compile.
 #[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
+fn panic(info: &PanicInfo) -> ! {
+    println!("{}", info);
     loop {}
 }
 
@@ -46,8 +47,9 @@ fn clear_screen(){
 // functions to be called specifically like C like register/stack positions and we want
 // stability.
 pub extern "C" fn _start() -> !{
-    
+
     clear_screen();
-    vga_buffer::print_something();
+    println!("Hello world{}","!\nTHis is the second line");
+    panic!("Testing panic");
     loop{}
 }
