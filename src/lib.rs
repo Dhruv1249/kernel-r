@@ -24,14 +24,6 @@ fn panic(_info: &PanicInfo) -> ! {
 }
 
 
-// Using no_mangle to disable name mangling.
-// Usually whenever rust compiles it gives each functions its own uniquely generated
-// cryptic id to differentiate it from all functions (it helps in overloading).
-// But in our case _start is the entry point for program and we always want it to have same
-// name.
-
-
-
 
 
 fn clear_screen(){
@@ -44,6 +36,11 @@ fn clear_screen(){
     }
 }
 
+// Using no_mangle to disable name mangling.
+// Usually whenever rust compiles it gives each functions its own uniquely generated
+// cryptic id to differentiate it from all functions (it helps in overloading).
+// But in our case _start is the entry point for program and we always want it to have same
+// name.
 #[unsafe( no_mangle )]
 // extern "C" tells rust to call the functions just like C since bootloader expects
 // functions to be called specifically like C like register/stack positions and we want
