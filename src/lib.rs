@@ -1,4 +1,4 @@
-// main.rs
+// src/lib.rs
 
 // Adding no_std to the crate allows it to be used in a no-std environment.
 // Since rust's standard libraries depends on dependencies like libc, provided by the os.
@@ -11,10 +11,29 @@
 // sets up the stacks, heap, backtrace for panics etc but all of it is provided in the stdlib
 // so we will override the entry point.
 #![no_main]
+#![feature(custom_test_frameworks)]
+#![test_runner(crate::test_runner)]
+pub fn test_runner(tests: &[&dyn Fn()]){
+    use qemu::QemuExitCode;
+    println!("Running {} tests.........",tests.len());
+    for test in tests{
+        test();
+    }
+    exit_qemu(QemuExitCode::Success);
+}
 
+
+mod qemu;
+mod serial;
 // Importing vga buffer library to print on screen.
 mod vga_buffer;
 use core::panic::PanicInfo;
+
+use crate::qemu::exit_qemu;
+
+
+
+
 
 // Defining a panic handler allows us to take care of the error gracefully.
 // Again without std, we will have to define a panic handler otherwise it won't compile.
@@ -24,18 +43,6 @@ fn panic(info: &PanicInfo) -> ! {
     loop {}
 }
 
-
-
-
-fn clear_screen(){
-    let vga_buffer = 0xb8000 as *mut u8;
-    for i in 0..80*25{
-        unsafe{
-            *vga_buffer.offset(i as isize *2) = 0x20;
-            *vga_buffer.offset(i as isize *2 +1) = 0x07;
-        }
-    }
-}
 
 // Using no_mangle to disable name mangling.
 // Usually whenever rust compiles it gives each functions its own uniquely generated
@@ -48,8 +55,20 @@ fn clear_screen(){
 // stability.
 pub extern "C" fn _start() -> !{
 
-    clear_screen();
+    vga_buffer::clear_screen(); 
     println!("Hello world{}","!\nTHis is the second line");
-    panic!("Testing panic");
+    #[cfg(feature = "test")]
+    test_main();
+
     loop{}
+}
+
+fn testing() {
+    assert_eq!(1, 1);
+    serial_println!("testing... ok");
+}
+
+#[cfg(feature = "test")]
+pub fn test_main() {
+    test_runner(&[&testing]);
 }

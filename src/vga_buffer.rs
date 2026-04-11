@@ -27,6 +27,18 @@ pub enum Color {
     White = 15,
 }
 
+
+pub fn clear_screen(){
+    let vga_buffer = 0xb8000 as *mut u8;
+    for i in 0..80*25{
+        unsafe{
+            *vga_buffer.offset(i as isize *2) = 0x20;
+            *vga_buffer.offset(i as isize *2 +1) = 0x07;
+        }
+    }
+}
+
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(transparent)]
 struct ColorCode(u8);
@@ -130,7 +142,8 @@ impl fmt::Write for Writer {
 }
 
 
-
+// Basically we have no heap atm so we need to initialize this lazy
+// i.e at runtime not at compile time
 lazy_static!{
     pub static ref WRITER: Mutex<Writer> = Mutex::new(Writer {
         column_position: 0,
