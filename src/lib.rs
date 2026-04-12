@@ -6,7 +6,7 @@
 // That's why disabling it here.
 #![no_std]
 // Also just learned #! -> for whole crate and only # -> for module directly below it!
-
+#![feature(abi_x86_interrupt)] 
 // We think rust starts with main, but in reality its entry point is a _start functions which
 // sets up the stacks, heap, backtrace for panics etc but all of it is provided in the stdlib
 // so we will override the entry point.
@@ -23,14 +23,14 @@ pub fn test_runner(tests: &[ ( &str, &dyn Fn()   )]){
     exit_qemu(QemuExitCode::Success);
 }
 
-
+mod interrupt;
 mod qemu;
 mod serial;
 // Importing vga buffer library to print on screen.
 mod vga_buffer;
 use core::panic::PanicInfo;
 
-use crate::qemu::exit_qemu;
+use crate::{interrupt::load_id, qemu::exit_qemu};
 
 
 
@@ -63,8 +63,12 @@ fn panic(info: &PanicInfo) -> ! {
 // stability.
 pub extern "C" fn _start() -> !{
 
+   
     vga_buffer::clear_screen(); 
+     load_id();
     println!("Hello world{}","!\nTHis is the second line");
+    x86_64::instructions::interrupts::int3();
+    println!("Still working after interrupts");
     #[cfg(feature = "test")]
     test_main();
 
