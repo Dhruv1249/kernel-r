@@ -31,7 +31,11 @@ set -e
 nasm -f elf64 src/boot.asm -o target/boot.o
 
 # Build the kernel
-cargo build --features test
+if [ "$istest" -eq 1 ]; then
+  cargo build --features test
+else
+  cargo build
+fi
 
 # We need to explicitly link them together using our linker script
 # LLD is the LLVM linker. We pass it our linker.ld, our assembly object, and our Rust binary.
