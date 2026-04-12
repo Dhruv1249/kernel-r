@@ -13,11 +13,12 @@
 #![no_main]
 #![feature(custom_test_frameworks)]
 #![test_runner(crate::test_runner)]
-pub fn test_runner(tests: &[&dyn Fn()]){
+pub fn test_runner(tests: &[ ( &str, &dyn Fn()   )]){
     use qemu::QemuExitCode;
     println!("Running {} tests.........",tests.len());
     for test in tests{
-        test();
+        serial_println!("Running {}",test.0);
+        test.1();
     }
     exit_qemu(QemuExitCode::Success);
 }
@@ -39,6 +40,13 @@ use crate::qemu::exit_qemu;
 // Again without std, we will have to define a panic handler otherwise it won't compile.
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
+    #[cfg(feature = "test")]
+    {
+        serial_println!("Test panicked");
+        serial_println!("{}", info);
+        exit_qemu(crate::qemu::QemuExitCode::Failure);
+    }
+
     println!("{}", info);
     loop {}
 }
@@ -70,5 +78,6 @@ fn testing() {
 
 #[cfg(feature = "test")]
 pub fn test_main() {
-    test_runner(&[&testing]);
+    serial_println!("Running tests...");
+    test_runner(&[( "testing",&testing )]);
 }
