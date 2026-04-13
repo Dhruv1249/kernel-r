@@ -23,14 +23,16 @@ pub fn test_runner(tests: &[ ( &str, &dyn Fn()   )]){
     exit_qemu(QemuExitCode::Success);
 }
 
+
+// Our imports here.
+mod gdt;
 mod interrupt;
 mod qemu;
 mod serial;
-// Importing vga buffer library to print on screen.
 mod vga_buffer;
 use core::panic::PanicInfo;
 
-use crate::{interrupt::load_id, qemu::exit_qemu};
+use crate::qemu::exit_qemu;
 
 
 
@@ -61,22 +63,18 @@ fn panic(info: &PanicInfo) -> ! {
 // extern "C" tells rust to call the functions just like C since bootloader expects
 // functions to be called specifically like C like register/stack positions and we want
 // stability.
-pub extern "C" fn _start() -> !{
-
-   
-    vga_buffer::clear_screen(); 
-     load_id();
-    println!("Hello world{}","!\nTHis is the second line");
-    x86_64::instructions::interrupts::int3();
-    println!("Still working after interrupts");
+pub extern "C" fn _start() -> ! {
+    vga_buffer::clear_screen();
+    gdt::init();
+    interrupt::load_idt();
+    println!("Hello world");
     fn stack_overflow() {
         stack_overflow();
     }
     stack_overflow();
     #[cfg(feature = "test")]
     test_main();
-
-    loop{}
+    loop {}
 }
 
 fn testing() {
