@@ -69,6 +69,10 @@ pub extern "C" fn _start() -> !{
     println!("Hello world{}","!\nTHis is the second line");
     x86_64::instructions::interrupts::int3();
     println!("Still working after interrupts");
+    fn stack_overflow() {
+        stack_overflow();
+    }
+    stack_overflow();
     #[cfg(feature = "test")]
     test_main();
 
