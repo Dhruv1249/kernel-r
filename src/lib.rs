@@ -54,6 +54,11 @@ fn panic(info: &PanicInfo) -> ! {
 }
 
 
+unsafe extern "C" {
+    static stack_bottom: u8;
+    static stack_top: u8;
+}
+
 // Using no_mangle to disable name mangling.
 // Usually whenever rust compiles it gives each functions its own uniquely generated
 // cryptic id to differentiate it from all functions (it helps in overloading).
@@ -64,6 +69,14 @@ fn panic(info: &PanicInfo) -> ! {
 // functions to be called specifically like C like register/stack positions and we want
 // stability.
 pub extern "C" fn _start() -> ! {
+    let stack_var = 0u64;
+    let stack_addr = &stack_var as *const _ as u64;
+    unsafe{
+        serial_println!("Stack bottom at {:#x}", &raw const stack_bottom as u64);
+        serial_println!("Stack top at {:#x}", &raw const stack_top as u64);
+    }
+    serial_println!("Stack is at: {:#x}", stack_addr);
+    serial_println!("Kernel code at: {:#x}", _start as *const () as u64);
     vga_buffer::clear_screen();
     gdt::init();
     interrupt::load_idt();
@@ -72,10 +85,11 @@ pub extern "C" fn _start() -> ! {
         stack_overflow();
     }
     stack_overflow();
-    #[cfg(feature = "test")]
-    test_main();
-    loop {}
+    println!("after stack overflow");
+    volatile::Volatile::new(0).read(); // prevent tail recursion optimizations
+    loop{}
 }
+
 
 fn testing() {
     assert_eq!(1, 1);

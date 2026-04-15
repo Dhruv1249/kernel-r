@@ -1,3 +1,5 @@
+// src/interrupt.rs
+
 use crate::println;
 use spin::Once;
 use x86_64::structures::idt::InterruptDescriptorTable;
@@ -15,10 +17,6 @@ pub fn load_idt() {
                 .set_handler_fn(double_fault_handler)
                 .set_stack_index(crate::gdt::DOUBLE_FAULT_IST_INDEX);
         }
-        // let df_entry = &idt.double_fault as *const _ as u64;
-        // crate::serial_println!("Double fault IDT entry at: {:#x}", df_entry);
-        // let handler_ptr = double_fault_handler as *const () as u64;
-        // crate::serial_println!("Double fault handler fn ptr: {:#x}", handler_ptr);
         idt
     });
     idt.load();
@@ -29,11 +27,11 @@ extern "x86-interrupt" fn page_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: PageFaultErrorCode,
 ) {
-    // use x86_64::registers::control::Cr2;
-    // crate::serial_println!("EXCEPTION: PAGE FAULT");
-    // crate::serial_println!("Accessed Address: {:?}", Cr2::read());
-    // crate::serial_println!("Error Code: {:?}", error_code);
-    // crate::serial_println!("{:#?}", stack_frame);
+    use x86_64::registers::control::Cr2;
+    crate::serial_println!("EXCEPTION: PAGE FAULT");
+    crate::serial_println!("Accessed Address: {:?}", Cr2::read());
+    crate::serial_println!("Error Code: {:?}", error_code);
+    crate::serial_println!("{:#?}", stack_frame);
     loop {}
 }
 
@@ -48,6 +46,7 @@ extern "x86-interrupt" fn double_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) -> ! {
+    // crate::exit_qemu(crate::qemu::QemuExitCode::Failure);
     crate::serial_println!("EXCEPTION: DOUBLE FAULT");
     crate::serial_println!("Error Code: {:#x}", error_code);
     crate::serial_println!("{:#?}", stack_frame);

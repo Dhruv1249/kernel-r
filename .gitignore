@@ -3,3 +3,4 @@ iso/
 *.iso
 *.o
 *.log
+kernel*

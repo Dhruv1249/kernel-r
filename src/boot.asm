@@ -9,6 +9,7 @@
 	;       Global start label tells the linker that this is the entry point
 	global  start
 
+
 	;       Magic code for multiboot
 	section .multiboot2
 
@@ -108,9 +109,52 @@ set_up_page_tables:
 	or  eax, 0b11
 	mov [p3_table], eax
 
+	mov eax, p1_table
+	or  eax, 0b11
+	mov [p2_table], eax
+
 	mov ecx, 0
 
-	; Mapping all the pages since our kernel was bigger than 2mb
+.map_p1_table:
+	imul eax, ecx, 0x1000; 4kb
+	or   eax, 0b11; Add flags
+	mov  [p1_table+ ecx * 8], eax; Write the entry
+	inc  ecx
+	cmp  ecx, 512
+	jne  .map_p1_table
+
+	;   Guard page
+	mov eax, guard_page
+	shr eax, 12; Divide by 4kb
+
+	mov dword [p1_table + eax * 8], 0; Clear lower 32 bits
+	mov dword [p1_table + eax * 8 + 4], 0; Clear upper 32 bits
+
+	; mov ecx, 1; Start index from 1 since index 0 is already mapped by p1_table
+
+  ; Link p1_table_2 to p2_table entry 1 (covers 0x200000-0x400000)
+	mov eax, p1_table_2
+	or  eax, 0b11
+	mov [p2_table + 1 * 8], eax
+
+	; Map all pages in p1_table_2
+	mov ecx, 0
+.map_p1_table_2:
+	imul eax, ecx, 0x1000
+    add  eax, 0x200000
+    or   eax, 0b11
+    mov  [p1_table_2 + ecx * 8], eax
+    inc  ecx
+    cmp  ecx, 512
+    jne  .map_p1_table_2
+	; Guard page — unmap page just below stack_bottom (0x237000)
+	mov eax, stack_bottom
+	sub eax, 4096
+	shr eax, 12
+	sub eax, 512		; subtract 512 because p1_table_2 starts at 0x200000
+	mov dword [p1_table_2 + eax * 8], 0
+	mov dword [p1_table_2 + eax * 8 + 4], 0
+  mov ecx, 2
 
 .map_p2_table:
 	;    Calculate the physical address of the 2mb page
@@ -156,9 +200,21 @@ p3_table:
 p2_table:
 	resb 4096
 
-stack_bottom:
-	resb 4096 * 4; Reserve 16 KB for the stack
+p1_table:
+	resb 4096
 
+p1_table_2:
+    resb 4096
+
+guard_page:
+	resb 4096
+
+global stack_bottom
+stack_bottom:
+	resb 4096 * 64; Reserve 16 KB for the stack
+
+
+global stack_top
 stack_top:
 
 	;       Some magic code for GDT (Global Descriptor Table)
