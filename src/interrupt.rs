@@ -51,6 +51,7 @@ extern "x86-interrupt" fn double_fault_handler(
     crate::serial_println!("Error Code: {:#x}", error_code);
     crate::serial_println!("{:#?}", stack_frame);
     crate::println!("EXCEPTION: DOUBLE FAULT");
-    // crate::exit_qemu(crate::qemu::QemuExitCode::Success);
+    crate::println!("{:#?}", stack_frame);
+    crate::exit_qemu(crate::qemu::QemuExitCode::Failure);
     loop {}
 }
