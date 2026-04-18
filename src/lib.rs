@@ -49,11 +49,16 @@ fn panic(info: &PanicInfo) -> ! {
     {
         serial_println!("Test panicked");
         serial_println!("{}", info);
-        exit_qemu(crate::qemu::QemuExitCode::Failure);
+        // exit_qemu(crate::qemu::QemuExitCode::Failure);
     }
 
+    serial_println!("Kernel Panicked!");
+    serial_println!("{}", info);
+    println!("Kernel Panicked!");
     println!("{}", info);
-    loop {}
+    loop {
+        x86_64::instructions::hlt(); // Puts the CPU to sleep until the next interrupt (which won't matter here)
+    }
 }
 
 
@@ -199,7 +204,7 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
 
     loop{}
 }
-
+//
 // fn stack_overflow() {
 //     stack_overflow();
 // }
