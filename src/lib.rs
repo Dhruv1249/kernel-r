@@ -33,9 +33,9 @@ mod vga_buffer;
 mod boot_info;
 mod memory;
 mod paging;
-use core::{hash::BuildHasher, panic::PanicInfo};
+use core:: panic::PanicInfo;
 
-use crate::{memory::{ALLOCATOR, BumpAllocator}, qemu::exit_qemu};
+use crate::qemu::exit_qemu;
 
 
 
@@ -119,7 +119,7 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
                 core::slice::from_raw_parts(first_entry_ptr, num_entries as usize)
             };
 
-            let mut allocator = crate::memory::BumpAllocator::init(k_end, entries);
+            let allocator = crate::memory::BumpAllocator::init(k_end, entries);
 
 
             // Move the allocator to the global lock
@@ -191,17 +191,17 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
     loop{}
 }
 
-fn stack_overflow() {
-    stack_overflow();
-}
-
-fn testing() {
-    assert_eq!(1, 1);
-    serial_println!("testing... ok");
-}
-
-#[cfg(feature = "test")]
-pub fn test_main() {
-    serial_println!("Running tests...");
-    test_runner(&[( "testing",&testing )]);
-}
+// fn stack_overflow() {
+//     stack_overflow();
+// }
+//
+// fn testing() {
+//     assert_eq!(1, 1);
+//     serial_println!("testing... ok");
+// }
+//
+// #[cfg(feature = "test")]
+// pub fn test_main() {
+//     serial_println!("Running tests...");
+//     test_runner(&[( "testing",&testing )]);
+// }

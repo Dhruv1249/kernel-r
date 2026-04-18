@@ -9,7 +9,6 @@
 	;       Global start label tells the linker that this is the entry point
 	global  start
 
-
 	;       Magic code for multiboot
 	section .multiboot2
 
@@ -27,13 +26,14 @@ header_end:
 
 start:
 
-  ;   Storing multiboot info & magic numbers in edi and esi to be accessed in rust
-  mov esi, eax
-  mov edi, ebx
 	;   Magic number put in eax by grub by default
 	;   We are just checking if we are booting successfully
 	cmp eax, 0x36d76289
 	jne no_multiboot
+
+	;   Storing multiboot info & magic numbers in edi and esi to be accessed in rust
+	mov esi, eax
+	mov edi, ebx
 
 	;   We are now gonna check if the cpu supports cpuid
 	;   CPUID is stored in bit 21 of the EFLAGS register
@@ -53,7 +53,7 @@ start:
 
 	;   Compare the two flags, if they are the same then the cpu supports cpuid
 	cmp ebx, eax
-	jne no_multiboot; Not equal, so we are not booting with multiboot
+	jne no_cpuid; Not equal, so we are not booting with multiboot
 
 	;     Calling cpuid
 	mov   eax, 0x80000001; Magic number to call cpuid
@@ -62,7 +62,7 @@ start:
 	;    Hers test sets all the bits except the 29th bit to zero
 	;    If the 29th bit is 1, then the cpu is 64 bit
 	test edx, 1 << 29
-	jz   no_multiboot; Halt if not 64 bit
+	jz   no_long_mode; Halt if not 64 bit
 
 	call set_up_page_tables
 
@@ -99,7 +99,48 @@ start:
 hlt
 
 no_multiboot:
-	hlt ; Something went wrong, halt the system
+	call clear_screen
+	mov esi, no_multiboot_str
+  mov edi, 0xb8000
+  mov ah, 0x0f
+  call print_loop
+	hlt  ; Something went wrong, halt the system
+
+no_long_mode:
+	call clear_screen
+	mov esi, long_mode_not_supported_str
+  mov edi, 0xb8000
+  mov ah, 0x0f
+  call print_loop
+
+	hlt  ; Something went wrong, halt the system
+
+no_cpuid:
+	call clear_screen
+	mov esi, cpu_not_supported_str
+  mov edi, 0xb8000
+  mov ah, 0x0f
+  call print_loop
+	hlt  ; Something went wrong, halt the system
+
+clear_screen:
+	mov edi, 0xb8000
+	mov ecx, 1000; We are writing 1000 32-bit chunks (4000 bytes total)
+	mov eax, 0x0f200f20; 0x20 is the space character, 0x0f is white-on-black. This puts two blank characters into eax.
+	rep stosd; Fill the screen
+	ret
+
+print_loop:
+  lodsb
+  cmp al, 0
+  je .done
+  mov [edi], al
+  mov [edi + 1], ah
+  add edi, 2
+  jmp print_loop
+
+.done:
+	ret
 
 set_up_page_tables:
 	;   Linking the page tables to the correct location
@@ -136,29 +177,30 @@ set_up_page_tables:
 
 	; mov ecx, 1; Start index from 1 since index 0 is already mapped by p1_table
 
-  ; Link p1_table_2 to p2_table entry 1 (covers 0x200000-0x400000)
+	;   Link p1_table_2 to p2_table entry 1 (covers 0x200000-0x400000)
 	mov eax, p1_table_2
 	or  eax, 0b11
 	mov [p2_table + 1 * 8], eax
 
-	; Map all pages in p1_table_2
+	;   Map all pages in p1_table_2
 	mov ecx, 0
+
 .map_p1_table_2:
 	imul eax, ecx, 0x1000
-    add  eax, 0x200000
-    or   eax, 0b11
-    mov  [p1_table_2 + ecx * 8], eax
-    inc  ecx
-    cmp  ecx, 512
-    jne  .map_p1_table_2
-	; Guard page — unmap page just below stack_bottom (0x237000)
-	mov eax, stack_bottom
-	sub eax, 4096
-	shr eax, 12
-	sub eax, 512		; subtract 512 because p1_table_2 starts at 0x200000
-	mov dword [p1_table_2 + eax * 8], 0
-	mov dword [p1_table_2 + eax * 8 + 4], 0
-  mov ecx, 2
+	add  eax, 0x200000
+	or   eax, 0b11
+	mov  [p1_table_2 + ecx * 8], eax
+	inc  ecx
+	cmp  ecx, 512
+	jne  .map_p1_table_2
+	;    Guard page — unmap page just below stack_bottom (0x237000)
+	mov  eax, stack_bottom
+	sub  eax, 4096
+	shr  eax, 12
+	sub  eax, 512; subtract 512 because p1_table_2 starts at 0x200000
+	mov  dword [p1_table_2 + eax * 8], 0
+	mov  dword [p1_table_2 + eax * 8 + 4], 0
+	mov  ecx, 2
 
 .map_p2_table:
 	;    Calculate the physical address of the 2mb page
@@ -208,21 +250,26 @@ p1_table:
 	resb 4096
 
 p1_table_2:
-    resb 4096
+	resb 4096
 
 guard_page:
 	resb 4096
 
-global stack_bottom
+	global stack_bottom
+
 stack_bottom:
 	resb 4096 * 64; Reserve 16 KB for the stack
 
+	global stack_top
 
-global stack_top
 stack_top:
 
 	;       Some magic code for GDT (Global Descriptor Table)
 	section .rodata
+
+  cpu_not_supported_str: db "CPUID not supported. Error code: C", 0 ; Here 0 is the null character
+  long_mode_not_supported_str: db "Long mode not supported. Error code: L", 0
+  no_multiboot_str: db "Multiboot error. Error code: M", 0
 
 gdt64:
 	dq 0; Entry 0: The Null Descriptor (CPU mandates the first entry be completely zero)
