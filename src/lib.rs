@@ -31,9 +31,11 @@ mod qemu;
 mod serial;
 mod vga_buffer;
 mod boot_info;
-use core::panic::PanicInfo;
+mod memory;
+mod paging;
+use core::{hash::BuildHasher, panic::PanicInfo};
 
-use crate::qemu::exit_qemu;
+use crate::{memory::{ALLOCATOR, BumpAllocator}, qemu::exit_qemu};
 
 
 
@@ -117,6 +119,20 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
                 core::slice::from_raw_parts(first_entry_ptr, num_entries as usize)
             };
 
+            let mut allocator = crate::memory::BumpAllocator::init(k_end, entries);
+
+
+            // Move the allocator to the global lock
+            *crate::memory::ALLOCATOR.lock() = Some(allocator);
+
+            crate::serial_println!("Allocating frame 1: {:#x?}", crate::memory::allocate_frame());
+            crate::serial_println!("Allocating frame 2: {:#x?}", crate::memory::allocate_frame());
+            crate::serial_println!("Allocating frame 3: {:#x?}", crate::memory::allocate_frame());
+            use x86_64::registers::control::Cr3;
+            let cr3 = Cr3::read();
+            crate::serial_print!("cr3: {:#x?}", cr3);
+
+
             for entry in entries {
                 serial_println!(
                     "Base: {:#010x}, Length: {:#010x}, Type: {}", 
@@ -128,6 +144,34 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
 
         }
     }
+
+    let p4_table = paging::active_level_4_table();
+
+    use x86_64::VirtAddr;
+    // Take absure virtual address for testing
+    let virt_addr = VirtAddr::new(0x1000_0000_0000);
+    let page = x86_64::structures::paging::Page::containing_address(virt_addr);
+
+    //  Ask our bump allocator for a fresh physical frame to back it
+    let physical_frame_addr = crate::memory::allocate_frame().unwrap();
+    let frame = x86_64::structures::paging::PhysFrame::containing_address(
+        x86_64::PhysAddr::new(physical_frame_addr as u64)
+    );
+
+    //  Map them together!
+    use x86_64::structures::paging::PageTableFlags;
+    crate::paging::map_to(page, frame, PageTableFlags::WRITABLE, p4_table);
+
+    // Test the mapping by writing to the VIRTUAL address
+    crate::serial_println!("Mapping successful! Writing to virtual address...");
+    let page_ptr = virt_addr.as_mut_ptr::<u64>();
+    unsafe {
+        // Write a recognizable hex value
+        *page_ptr = 0xABCDEF;
+    }
+
+    crate::serial_println!("Successfully read back: {:#X}", unsafe { *page_ptr });
+
 
     // Clear the screen
     vga_buffer::clear_screen();
