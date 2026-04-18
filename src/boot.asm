@@ -127,6 +127,7 @@ clear_screen:
 	mov edi, 0xb8000
 	mov ecx, 1000; We are writing 1000 32-bit chunks (4000 bytes total)
 	mov eax, 0x0f200f20; 0x20 is the space character, 0x0f is white-on-black. This puts two blank characters into eax.
+  cld
 	rep stosd; Fill the screen
 	ret
 
@@ -258,7 +259,7 @@ guard_page:
 	global stack_bottom
 
 stack_bottom:
-	resb 4096 * 64; Reserve 16 KB for the stack
+	resb 4096 * 128; Reserve 512 KB for the stack
 
 	global stack_top
 
