@@ -188,7 +188,7 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
 
 
     // Clear the screen
-    vga_buffer::clear_screen();
+    crate::vga_buffer::WRITER.lock().clear(); 
     // Load the GDT and the IDT
     gdt::init();
     interrupt::load_idt();

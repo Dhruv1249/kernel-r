@@ -1,9 +1,9 @@
 // src/vga_buffer.rs
 
 use core::fmt;
-use volatile::Volatile;
 use lazy_static::lazy_static;
 use spin::Mutex;
+use volatile::Volatile;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,18 +26,6 @@ pub enum Color {
     Yellow = 14,
     White = 15,
 }
-
-
-pub fn clear_screen(){
-    let vga_buffer = 0xb8000 as *mut u8;
-    for i in 0..80*25{
-        unsafe{
-            *vga_buffer.offset(i as isize *2) = 0x20;
-            *vga_buffer.offset(i as isize *2 +1) = 0x07;
-        }
-    }
-}
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(transparent)]
@@ -94,32 +82,34 @@ impl Writer {
     }
 
     fn new_line(&mut self) {
-        for row in 1..BUFFER_HEIGHT{
+        for row in 1..BUFFER_HEIGHT {
             for col in 0..BUFFER_WIDHT {
                 let character = self.buffer.chars[row][col].read();
                 self.buffer.chars[row - 1][col].write(character);
             }
         }
 
-        self.clear_row(BUFFER_HEIGHT-1);
+        self.clear_row(BUFFER_HEIGHT - 1);
         self.column_position = 0;
-
     }
 
-    fn clear_row(&mut self, row: usize){
-        let blank_char = ScreenChar{
+    fn clear_row(&mut self, row: usize) {
+        let blank_char = ScreenChar {
             ascii_character: b' ',
-            color_code: self.color_code
+            color_code: self.color_code,
         };
 
-        for col in 0..BUFFER_WIDHT{
+        for col in 0..BUFFER_WIDHT {
             self.buffer.chars[row][col].write(blank_char);
         }
-
     }
-}
 
-impl Writer {
+    pub fn clear(&mut self) {
+        for row in 0..BUFFER_HEIGHT {
+            self.clear_row(row);
+        }
+    }
+
     pub fn write_string(&mut self, s: &str) {
         for byte in s.bytes() {
             match byte {
@@ -141,18 +131,15 @@ impl fmt::Write for Writer {
     }
 }
 
-
 // Basically we have no heap atm so we need to initialize this lazy
 // i.e at runtime not at compile time
-lazy_static!{
+lazy_static! {
     pub static ref WRITER: Mutex<Writer> = Mutex::new(Writer {
         column_position: 0,
         color_code: ColorCode::new(Color::Yellow, Color::Black),
         buffer: unsafe { &mut *(0xb8000 as *mut Buffer) },
     });
-    
 }
-
 
 // Defining our prin macros
 // Mostly copied from the official print macro defininition
