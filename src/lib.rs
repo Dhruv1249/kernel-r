@@ -38,6 +38,18 @@ use core:: panic::PanicInfo;
 use crate::qemu::exit_qemu;
 
 
+fn dump_registers() {
+    serial_println!("Dumping registers");
+    let rflags = x86_64::registers::rflags::read();
+    serial_println!("rflags: {:#x}", rflags.bits());
+    let rip = x86_64::registers::control::Cr2::read();
+    serial_println!("rip: {:#x}", rip);
+    let mut rsp: u64;
+    unsafe {
+        core::arch::asm!("mov {}, rsp", out(reg) rsp);
+    }
+    serial_println!("rsp: {:#x}", rsp);
+}
 
 
 
@@ -56,6 +68,7 @@ fn panic(info: &PanicInfo) -> ! {
     serial_println!("{}", info);
     println!("Kernel Panicked!");
     println!("{}", info);
+    dump_registers();
     loop {
         x86_64::instructions::hlt(); // Puts the CPU to sleep until the next interrupt (which won't matter here)
     }
@@ -197,14 +210,13 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
     println!("Hello world");
   
     // stack_overflow();
-    // println!("after stack overflow");
     // #[cfg(feature = "test")]
     // test_main();
 
 
     loop{}
 }
-//
+
 // fn stack_overflow() {
 //     stack_overflow();
 // }
