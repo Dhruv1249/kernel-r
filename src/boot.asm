@@ -26,6 +26,10 @@ header_start:
 header_end:
 
 start:
+
+  ;   Storing multiboot info & magic numbers in edi and esi to be accessed in rust
+  mov esi, eax
+  mov edi, ebx
 	;   Magic number put in eax by grub by default
 	;   We are just checking if we are booting successfully
 	cmp eax, 0x36d76289

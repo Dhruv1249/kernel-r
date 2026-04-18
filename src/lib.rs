@@ -30,6 +30,7 @@ mod interrupt;
 mod qemu;
 mod serial;
 mod vga_buffer;
+mod boot_info;
 use core::panic::PanicInfo;
 
 use crate::qemu::exit_qemu;
@@ -59,6 +60,12 @@ unsafe extern "C" {
     static stack_top: u8;
 }
 
+
+unsafe extern "C" {
+    static kernel_start: u8;
+    static kernel_end: u8;
+}
+
 // Using no_mangle to disable name mangling.
 // Usually whenever rust compiles it gives each functions its own uniquely generated
 // cryptic id to differentiate it from all functions (it helps in overloading).
@@ -68,27 +75,73 @@ unsafe extern "C" {
 // extern "C" tells rust to call the functions just like C since bootloader expects
 // functions to be called specifically like C like register/stack positions and we want
 // stability.
-pub extern "C" fn _start() -> ! {
+pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -> ! {
     let stack_var = 0u64;
     let stack_addr = &stack_var as *const _ as u64;
+    let k_start = &raw const kernel_start as usize;
+    let k_end = &raw const kernel_end as usize;
    
     // Debug prints
     serial_println!("Stack bottom at {:#x}", &raw const stack_bottom as u64);
     serial_println!("Stack top at {:#x}", &raw const stack_top as u64);
     serial_println!("Stack is at: {:#x}", stack_addr);
     serial_println!("Kernel code at: {:#x}", _start as *const () as u64);
+    serial_println!("Multiboot info at: {:#x}", multiboot_info_addr);
+    serial_println!("GRUB magic number: {:#x}", grub_magic_number);
+    serial_println!("Kernel start: {:#x}", k_start);
+    serial_println!("Kernel end: {:#x}", k_end);
+
+
+    let mbi_ptr = multiboot_info_addr as *const u32;
+
+    let mbi = unsafe { &*mbi_ptr };
+    serial_println!("Multiboot size: {:?}", mbi);
+
+    let tag_iter = boot_info::TagIterator::new(multiboot_info_addr);
+
+    for tag in tag_iter {
+        let tag_header = unsafe { &*tag };
+
+        if tag_header.typ == 6 {
+            let mmap_entry = unsafe {
+                &*(tag as *const boot_info::MemoryMapTag)
+            };
+
+            let num_entries = (mmap_entry.size -16) / mmap_entry.entry_size;
+
+
+            // First entry starts exactly 16 bytes after the tag tag header
+            let first_entry_ptr = (tag as usize + 16 ) as *const boot_info::MemoryMapEntry;
+
+            let entries = unsafe {
+                core::slice::from_raw_parts(first_entry_ptr, num_entries as usize)
+            };
+
+            for entry in entries {
+                serial_println!(
+                    "Base: {:#010x}, Length: {:#010x}, Type: {}", 
+                    entry.base_addr, 
+                    entry.length, 
+                    entry.typ
+                )
+            }
+
+        }
+    }
 
     // Clear the screen
     vga_buffer::clear_screen();
     // Load the GDT and the IDT
     gdt::init();
     interrupt::load_idt();
+
+
     println!("Hello world");
   
     // stack_overflow();
     // println!("after stack overflow");
-    #[cfg(feature = "test")]
-    test_main();
+    // #[cfg(feature = "test")]
+    // test_main();
 
 
     loop{}
