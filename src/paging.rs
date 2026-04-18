@@ -3,12 +3,14 @@
 use x86_64::registers::control::Cr3;
 use x86_64::structures::paging::{Page, PageTable, PageTableFlags, PhysFrame};
 
+pub const PHYS_OFFSET: u64 = 0; // TODO: Change to 0xFFFF_8000_0000_0000 in Phase 1
+
 pub fn active_level_4_table() -> &'static mut PageTable {
     let cr3 = Cr3::read();
 
     let physical_address = cr3.0.start_address();
 
-    let virtual_addres = physical_address.as_u64();
+    let virtual_addres = physical_address.as_u64() + PHYS_OFFSET;
 
     let page_table_ptr = virtual_addres as *mut PageTable;
 
@@ -21,13 +23,13 @@ pub fn map_to(page: Page, frame: PhysFrame, flags: PageTableFlags, p4_table: &mu
         let frame_addr = crate::memory::allocate_zeroed_frame().expect("Out of physical memory");
 
         let phy_addr = x86_64::PhysAddr::new(frame_addr as u64);
-
+    
         let table_flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
         p4_entry.set_addr(phy_addr, table_flags);
     }
 
     let p4_addr = p4_entry.addr();
-    let virtual_addr = p4_addr.as_u64();
+    let virtual_addr = p4_addr.as_u64() + PHYS_OFFSET;
 
     // Cast the pointer to a raw pointer
     let p4_table_ptr = virtual_addr as *mut PageTable;
@@ -44,7 +46,7 @@ pub fn map_to(page: Page, frame: PhysFrame, flags: PageTableFlags, p4_table: &mu
     }
 
     let p3_addr = p3_entry.addr();
-    let virtual_addr = p3_addr.as_u64();
+    let virtual_addr = p3_addr.as_u64() + PHYS_OFFSET;
 
     // Cast the pointer to a raw pointer
     let p3_table_ptr = virtual_addr as *mut PageTable;
@@ -61,7 +63,7 @@ pub fn map_to(page: Page, frame: PhysFrame, flags: PageTableFlags, p4_table: &mu
     }
 
     let p2_addr = p2_entry.addr();
-    let virtual_addr = p2_addr.as_u64();
+    let virtual_addr = p2_addr.as_u64() + PHYS_OFFSET;
 
     // Cast the pointer to a raw pointer
     let p2_table_ptr = virtual_addr as *mut PageTable;

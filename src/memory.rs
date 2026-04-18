@@ -7,10 +7,23 @@ pub struct BumpAllocator {
     next_free_frame: usize,
     // Static slice of memory map provided by GRUB
     memory_map: &'static [MemoryMapEntry],
+
+    // Dynamic exclusion zones
+    mbi_start: usize,
+    mbi_end: usize,
+    stack_start: usize,
+    stack_end: usize,
 }
 
 impl BumpAllocator {
-    pub fn init(kernel_end: usize, memory_map: &'static [MemoryMapEntry]) -> Self {
+    pub fn init(
+        kernel_end: usize,
+        memory_map: &'static [MemoryMapEntry],
+        mbi_start: usize,
+        mbi_end: usize,
+        stack_start: usize,
+        stack_end: usize,
+    ) -> Self {
         // Align kernel end to 4096 ie 4kb since a page frame must always be 4kb aligned
         // Its just ceil(kernel_end / 4096) * 4096
         let aligned_addr = (kernel_end + 4095) & !(4096 - 1);
@@ -18,6 +31,10 @@ impl BumpAllocator {
         BumpAllocator {
             next_free_frame,
             memory_map,
+            mbi_start,
+            mbi_end,
+            stack_start,
+            stack_end,
         }
     }
 
@@ -32,7 +49,23 @@ impl BumpAllocator {
                 if self.next_free_frame > candidate {
                     candidate = self.next_free_frame;
                 }
-
+                // --- COLLISION CHECKS ---
+                // 1. IVT / BIOS area
+                if candidate + 4096 > 0x0 && candidate < 0x1000 {
+                    candidate = 0x1000;
+                }
+                // 2. VGA / BIOS reserved area
+                if candidate + 4096 > 0xA0000 && candidate < 0x100000 {
+                    candidate = 0x100000;
+                }
+                // 3. Multiboot Info
+                if candidate + 4096 > self.mbi_start && candidate < self.mbi_end {
+                    candidate = self.mbi_end;
+                }
+                // 4. Boot Stack
+                if candidate + 4096 > self.stack_start && candidate < self.stack_end {
+                    candidate = self.stack_end;
+                }
                 //Align the candidate to a 4KB boundary
                 candidate = (candidate + 4095) & !(4096 - 1);
 
@@ -47,12 +80,10 @@ impl BumpAllocator {
     }
 }
 
-
 use spin::Mutex;
 
 // Start as None we will fill it at runtime
-pub static ALLOCATOR: Mutex<Option< BumpAllocator >> = Mutex::new(None);
-
+pub static ALLOCATOR: Mutex<Option<BumpAllocator>> = Mutex::new(None);
 
 pub fn allocate_frame() -> Option<usize> {
     let mut lock = ALLOCATOR.lock();
@@ -63,7 +94,6 @@ pub fn allocate_frame() -> Option<usize> {
         None
     }
 }
-
 
 // Allocates a 4KB physical frame and completely zeroes it out.
 pub fn allocate_zeroed_frame() -> Option<usize> {

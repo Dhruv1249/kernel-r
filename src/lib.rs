@@ -82,6 +82,8 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
     let stack_addr = &stack_var as *const _ as u64;
     let k_start = &raw const kernel_start as usize;
     let k_end = &raw const kernel_end as usize;
+    let st_top = &raw const stack_top as usize;
+    let st_bottom = &raw const stack_bottom as usize;
    
     // Debug prints
     serial_println!("Stack bottom at {:#x}", &raw const stack_bottom as u64);
@@ -119,7 +121,14 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
                 core::slice::from_raw_parts(first_entry_ptr, num_entries as usize)
             };
 
-            let allocator = crate::memory::BumpAllocator::init(k_end, entries);
+            let allocator = crate::memory::BumpAllocator::init(
+                k_end, 
+                entries, 
+                multiboot_info_addr, 
+                multiboot_info_addr+ (*mbi as usize), 
+                st_bottom, 
+                st_top 
+                );
 
 
             // Move the allocator to the global lock
