@@ -336,3 +336,34 @@ impl BitmapAllocator {
         None // Out of memory
     }
 }
+
+// Comically large number easy to debug
+pub const HEAP_START: usize = 0x_4444_4444_0000;
+pub const HEAP_SIZE: usize = 1024 * 100; // 100 KB
+
+pub fn init_heap(p4_table: &mut x86_64::structures::paging::PageTable) {
+    let heap_start_page = x86_64::structures::paging::page::Page::containing_address(
+        x86_64::VirtAddr::new(HEAP_START as u64),
+    );
+    let heap_end_page = x86_64::structures::paging::page::Page::containing_address(
+        x86_64::VirtAddr::new((HEAP_START + HEAP_SIZE - 1) as u64),
+    );
+    let heap_range =
+        x86_64::structures::paging::Page::range_inclusive(heap_start_page, heap_end_page);
+
+    for page in heap_range {
+        let frame = allocate_frame();
+        if frame.is_none() {
+            panic!("Out of memory in heap");
+        }
+        let frame_addr = frame.unwrap();
+
+        let phys_address = x86_64::PhysAddr::new(frame_addr as u64);
+        let flags = x86_64::structures::paging::PageTableFlags::PRESENT
+            | x86_64::structures::paging::PageTableFlags::WRITABLE;
+        let physical_frame = x86_64::structures::paging::PhysFrame::containing_address(phys_address);
+        
+
+        crate::paging::map_to(page, physical_frame, flags, p4_table);
+    }
+}

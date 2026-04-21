@@ -22,7 +22,7 @@ pub fn test_runner(tests: &[ ( &str, &dyn Fn()   )]){
     }
     exit_qemu(QemuExitCode::Success);
 }
-
+extern crate alloc;
 
 // Our imports here.
 mod gdt;
@@ -33,6 +33,7 @@ mod vga_buffer;
 mod boot_info;
 mod memory;
 mod paging;
+mod allocator;
 use core:: panic::PanicInfo;
 
 use crate::{memory::ALLOCATOR, qemu::exit_qemu};
@@ -75,6 +76,12 @@ fn panic(info: &PanicInfo) -> ! {
 }
 
 
+// Defining our global heap
+#[global_allocator]
+static HEAP_ALLOCATOR: crate::allocator::Locked<crate::allocator::LinkedListAllocator> = 
+    crate::allocator::Locked::new(crate::allocator::LinkedListAllocator::new());
+
+
 unsafe extern "C" {
     static stack_bottom: u8;
     static stack_top: u8;
@@ -96,6 +103,14 @@ unsafe extern "C" {
 // functions to be called specifically like C like register/stack positions and we want
 // stability.
 pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -> ! {
+
+    // Load the GDT and the IDT
+    gdt::init();
+    interrupt::load_idt();
+    
+    // Clear the screen
+    crate::vga_buffer::WRITER.lock().clear();
+
     let stack_var = 0u64;
     let stack_addr = &stack_var as *const _ as u64;
     let k_start = &raw const kernel_start as usize;
@@ -187,15 +202,39 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
 
     crate::serial_println!("Successfully read back: {:#X}", unsafe { *page_ptr });
 
+    // Initalize the heap
+    crate::memory::init_heap(p4_table);
 
-    // Clear the screen
-    crate::vga_buffer::WRITER.lock().clear(); 
-    // Load the GDT and the IDT
-    gdt::init();
-    interrupt::load_idt();
+    // Give pages to the heap
+    unsafe {
+        crate::HEAP_ALLOCATOR.lock().init(crate::memory::HEAP_START, crate::memory::HEAP_SIZE);
+    }
 
+    crate::serial_println!("Heap initialized");
 
-    println!("Hello world");
+    // Testing heap
+    use alloc::vec::Vec;
+
+    let mut test_vec = Vec::new();
+
+    crate::serial_println!("Test vec initialized");
+
+    for i in 0..1000 {
+        test_vec.push(i);
+    }
+
+    for _ in 0..500 {
+        test_vec.pop();
+    }
+
+    println!("Test vec: {:?}", test_vec);
+
+    crate::vga_buffer::WRITER.lock().clear();
+
+    use alloc::string::String;
+    let mut test_string = String::new();
+    test_string.push_str("Hello world");
+    println!("Test string: {:?}", test_string);
   
     // stack_overflow();
     // #[cfg(feature = "test")]
