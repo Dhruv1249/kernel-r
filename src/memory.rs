@@ -13,6 +13,15 @@ pub struct BumpAllocator {
     mbi_end: usize,
     stack_start: usize,
     stack_end: usize,
+    kernel_end: usize,
+}
+
+pub struct exclusion_zones {
+    mbi_start: usize,
+    mbi_end: usize,
+    stack_start: usize,
+    stack_end: usize,
+    kernel_end: usize,
 }
 
 impl BumpAllocator {
@@ -35,6 +44,7 @@ impl BumpAllocator {
             mbi_end,
             stack_start,
             stack_end,
+            kernel_end: next_free_frame,
         }
     }
 
@@ -118,12 +128,22 @@ impl BumpAllocator {
         }
         None
     }
+
+    pub fn get_exclusion_zones(&self) -> exclusion_zones {
+        exclusion_zones {
+            mbi_start: self.mbi_start,
+            mbi_end: self.mbi_end,
+            stack_start: self.stack_start,
+            stack_end: self.stack_end,
+            kernel_end: self.kernel_end,
+        }
+    }
 }
 
 use spin::Mutex;
 
 // Start as None we will fill it at runtime
-pub static ALLOCATOR: Mutex<Option<BumpAllocator>> = Mutex::new(None);
+pub static ALLOCATOR: Mutex<Option<BitmapAllocator>> = Mutex::new(None);
 
 pub fn allocate_frame() -> Option<usize> {
     let mut lock = ALLOCATOR.lock();
@@ -155,6 +175,9 @@ pub struct BitmapAllocator {
     bitmap_ptr: *mut u8,
     total_frames: usize,
 }
+
+// Letting compiler know that we will be using this struct in a multithreaded environment
+unsafe impl Send for BitmapAllocator {}
 
 impl BitmapAllocator {
     pub fn init(memory_map: &'static [MemoryMapEntry], bump_alloc: &mut BumpAllocator) -> Self {
@@ -196,11 +219,12 @@ impl BitmapAllocator {
             total_frames,
         };
 
+        // Mark the usable memory as free
         for mem in memory_map {
             if mem.typ == 1 {
                 let region_base = mem.base_addr as usize;
                 let region_end = region_base + mem.length as usize;
-                
+
                 // Convert address to frame indices
                 let region_base = region_base / 4096;
                 let region_end = region_end / 4096;
@@ -209,6 +233,41 @@ impl BitmapAllocator {
                     allocator.clear_bit(i);
                 }
             }
+        }
+
+        // Rereserving exclusion zones
+
+        let exclusion_zones = bump_alloc.get_exclusion_zones();
+
+        let stack_start_frame = exclusion_zones.stack_start / 4096;
+        let stack_end_frame = (exclusion_zones.stack_end + 4095) / 4096;
+        let mbi_start_frame = exclusion_zones.mbi_start / 4096;
+        let mbi_end_frame = (exclusion_zones.mbi_end + 4095) / 4096;
+
+        // Reserve frames for multiboot info
+        for i in mbi_start_frame..mbi_end_frame {
+            allocator.set_bit(i);
+        }
+
+        // Reserve frames for boot stack
+        for i in stack_start_frame..stack_end_frame {
+            allocator.set_bit(i);
+        }
+
+        // Reserve frames for kernel
+        let kernel_start_frame = 0;
+        let kernel_end_frame = (exclusion_zones.kernel_end + 4095) / 4096;
+
+        for i in kernel_start_frame..kernel_end_frame {
+            allocator.set_bit(i);
+        }
+
+        // Set bits for bitmap itself
+        let bitmap_start_frame = frames.unwrap() / 4096;
+        let bitmap_end_frame = (frames.unwrap() + bitmap_size_in_bytes + 4095) / 4096;
+
+        for i in bitmap_start_frame..bitmap_end_frame {
+            allocator.set_bit(i);
         }
 
         allocator
@@ -246,5 +305,34 @@ impl BitmapAllocator {
             // Example: 01000100 & 11111011 = 01000000
             *byte_ptr = *byte_ptr & mask;
         }
+    }
+
+    pub fn is_bit_free(&self, index: usize) -> bool {
+        let byte_index = index / 8;
+        let bit_offset = index % 8;
+
+        // Create a mask with a 1 in the exact position, and 0s everywhere else
+        let mask = 1 << bit_offset;
+
+        unsafe {
+            // Get the pointer to the byte
+            let byte_ptr = self.bitmap_ptr.add(byte_index);
+
+            // Read the byte, AND it with the mask
+            // Example: 01000100 & 00000100 = 00000100
+            // If the result is 0, then the bit is free
+            *byte_ptr & mask == 0
+        }
+    }
+
+    pub fn allocate_frame(&mut self) -> Option<usize> {
+        for i in 0..self.total_frames {
+            if self.is_bit_free(i) {
+                // Free frame
+                self.set_bit(i); // Set the bit to 1 to mark it as used
+                return Some(i * 4096); // Return the frame address
+            }
+        }
+        None // Out of memory
     }
 }

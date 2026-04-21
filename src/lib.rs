@@ -35,7 +35,7 @@ mod memory;
 mod paging;
 use core:: panic::PanicInfo;
 
-use crate::qemu::exit_qemu;
+use crate::{memory::ALLOCATOR, qemu::exit_qemu};
 
 
 fn dump_registers() {
@@ -139,7 +139,7 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
                 core::slice::from_raw_parts(first_entry_ptr, num_entries as usize)
             };
 
-            let allocator = crate::memory::BumpAllocator::init(
+            let mut allocator = crate::memory::BumpAllocator::init(
                 k_end, 
                 entries, 
                 multiboot_info_addr, 
@@ -149,25 +149,13 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
                 );
 
 
+            let bitmap_allocator = crate::memory::BitmapAllocator::init(entries, &mut allocator);
             // Move the allocator to the global lock
-            *crate::memory::ALLOCATOR.lock() = Some(allocator);
+            *crate::memory::ALLOCATOR.lock() = Some(bitmap_allocator);
 
-            crate::serial_println!("Allocating frame 1: {:#x?}", crate::memory::allocate_frame());
-            crate::serial_println!("Allocating frame 2: {:#x?}", crate::memory::allocate_frame());
-            crate::serial_println!("Allocating frame 3: {:#x?}", crate::memory::allocate_frame());
-            use x86_64::registers::control::Cr3;
-            let cr3 = Cr3::read();
-            crate::serial_print!("cr3: {:#x?}", cr3);
-
-
-            for entry in entries {
-                serial_println!(
-                    "Base: {:#010x}, Length: {:#010x}, Type: {}", 
-                    entry.base_addr, 
-                    entry.length, 
-                    entry.typ
-                )
-            }
+            serial_print!("Allocating frame1: {:#x?}\n", crate::memory::allocate_frame()); 
+            serial_print!("Allocating frame2: {:#x?}\n", crate::memory::allocate_frame()); 
+            serial_print!("Allocating frame3: {:#x?}\n", crate::memory::allocate_frame()); 
 
         }
     }
