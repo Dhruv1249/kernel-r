@@ -212,24 +212,34 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
 
     crate::serial_println!("Heap initialized");
 
-    // Testing heap
+    // --- TESTING HEAP COALESCING ---
+    crate::serial_println!("--- Starting Heap Coalescing Test ---");
     use alloc::vec::Vec;
 
-    let mut test_vec = Vec::new();
+    // 1. Allocate 3 separate blocks (10,000 bytes each)
+    let vec1: Vec<u8> = Vec::with_capacity(10_000);
+    let vec2: Vec<u8> = Vec::with_capacity(10_000);
+    let vec3: Vec<u8> = Vec::with_capacity(10_000);
+    crate::serial_println!("Allocated 3 vectors (10KB each).");
 
-    crate::serial_println!("Test vec initialized");
+    //  Fragment the heap by dropping them out of order
+    drop(vec2);
+    crate::serial_println!("Dropped middle vector (Created a hole).");
+    
+    drop(vec1);
+    crate::serial_println!("Dropped first vector (Triggered Merge Right!).");
+    
+    drop(vec3);
+    crate::serial_println!("Dropped third vector (Triggered Merge Left!).");
 
-    for i in 0..1000 {
-        test_vec.push(i);
-    }
+    //  The Ultimate Test: Ask for lagre amount of bytes. 
+    // If coalescing failed, the heap is split into three 10K blocks, 
+    // and this will instantly trigger an Out-Of-Memory panic!
+    let huge_vec: Vec<u8> = Vec::with_capacity(1024*99);
+    crate::serial_println!("SUCCESS! Allocated huge vector of capacity: {}", huge_vec.capacity());
+    crate::serial_println!("--- Heap Coalescing Works! ---");
 
-    for _ in 0..500 {
-        test_vec.pop();
-    }
-
-    println!("Test vec: {:?}", test_vec);
-
-    crate::vga_buffer::WRITER.lock().clear();
+    // crate::vga_buffer::WRITER.lock().clear();
 
     use alloc::string::String;
     let mut test_string = String::new();

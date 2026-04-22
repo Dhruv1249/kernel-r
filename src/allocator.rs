@@ -1,5 +1,7 @@
 // src/allocator.rs
 
+use core::usize;
+
 pub struct ListNode {
     size: usize,
     next: Option<&'static mut ListNode>,
@@ -129,15 +131,57 @@ impl LinkedListAllocator {
 
     pub fn dealloc(&mut self, ptr: *mut u8, layout: core::alloc::Layout) {
         let (size, _) = LinkedListAllocator::size_align(layout);
-        let new_node_ptr = ptr as *mut ListNode;
+        let free_ptr = ptr as usize;
+        let mut current = &mut self.head;
 
-        // Write node data in free memory
-        unsafe {
-            (*new_node_ptr).size = size;
-            (*new_node_ptr).next = self.head.next.take();
+        while let Some(mut region) = current.next.take() {
+            let next_start = region as *const _ as usize;
+            // If the next region starts after the free pointer, we are done
+            if next_start > free_ptr as usize {
+                current.next = Some(region);
+                break;
+            }
+            current.next = Some(region);
+            current = current.next.as_mut().unwrap();
         }
 
-        self.head.next = Some(unsafe { &mut *new_node_ptr });
+        let current_addr = current as *const _ as usize;
+
+        let merges_left = current_addr + current.size == free_ptr;
+
+        let merges_right = if let Some(ref mut next_region) = current.next {
+            free_ptr + size == (*next_region) as *const _ as usize
+        } else {
+            false
+        };
+
+        if merges_left && merges_right {
+            // Merge the two regions
+            let next_region = current.next.take().unwrap();
+            current.size += size + next_region.size;
+            current.next = next_region.next.take();
+        } else if merges_left {
+            // Merge the left region
+            current.size += size;
+        } else if merges_right {
+            // Merge the right region
+            let next_region = current.next.take().unwrap();
+            let new_ptr = free_ptr as *mut ListNode;
+            unsafe {
+                (*new_ptr).size = size + next_region.size;
+                (*new_ptr).next = next_region.next.take();
+            }
+            unsafe {
+                current.next = Some(&mut *new_ptr);
+            }
+        } else {
+            let new_ptr = free_ptr as *mut ListNode;
+            unsafe {
+                (*new_ptr).size = size;
+                (*new_ptr).next = current.next.take();
+                current.next = Some(&mut *new_ptr);
+            }
+        }
     }
 }
 
