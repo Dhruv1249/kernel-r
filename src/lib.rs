@@ -274,7 +274,7 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
     test_string.push_str("Hello world");
     println!("Test string: {:?}", test_string);
   
-    stack_overflow();
+    // stack_overflow();
     // #[cfg(feature = "test")]
     // test_main();
 
@@ -282,9 +282,9 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
     loop{}
 }
 
-fn stack_overflow() {
-    stack_overflow();
-}
+// fn stack_overflow() {
+//     stack_overflow();
+// }
 //
 // fn testing() {
 //     assert_eq!(1, 1);

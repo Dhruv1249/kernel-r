@@ -128,3 +128,57 @@ pub fn unmap(page: Page, p4_table: &mut PageTable) -> Option<PhysFrame> {
     
     Some(x86_64::structures::paging::PhysFrame::containing_address(phys_addr))
 }
+
+
+pub fn translate_addr(virt_addr: x86_64::VirtAddr) -> Option<x86_64::PhysAddr>{
+    let p4_table = active_level_4_table();
+
+    let p4_index = virt_addr.p4_index();
+    let p3_index = virt_addr.p3_index();
+    let p2_index = virt_addr.p2_index();
+    let p1_index = virt_addr.p1_index();
+
+    let p4_entry = &p4_table[p4_index];
+    if p4_entry.is_unused() {
+        return None;
+    }
+
+    let p3_table_ptr = (p4_entry.addr().as_u64() + PHYS_OFFSET) as *mut PageTable;
+    let p3_table = unsafe { &mut *p3_table_ptr };
+
+    let p3_entry = &p3_table[p3_index];
+    if p3_entry.is_unused() {
+        return None;
+    }
+
+    let p2_table_ptr = (p3_entry.addr().as_u64() + PHYS_OFFSET) as *mut PageTable;
+    let p2_table = unsafe { &mut *p2_table_ptr };
+
+    let p2_entry = &p2_table[p2_index];
+    if p2_entry.is_unused() {
+        return None;
+    }
+
+    if p2_entry.flags().contains(x86_64::structures::paging::PageTableFlags::HUGE_PAGE) {
+        let huge_offset = virt_addr.as_u64() & 0x1FFFFF;
+        return Some(x86_64::PhysAddr::new(p2_entry.addr().as_u64() + huge_offset));
+    }
+
+    let p1_table_ptr = (p2_entry.addr().as_u64() + PHYS_OFFSET) as *mut PageTable;
+    let p1_table = unsafe { &mut *p1_table_ptr };
+
+    let p1_entry = &p1_table[p1_index];
+    if p1_entry.is_unused() {
+        return None;
+    }
+    //  Get the base address of the 4KB physical frame
+    let frame_base = p1_entry.addr().as_u64();
+    
+    // Extract the 12-bit page offset from the original virtual address
+    let page_offset = virt_addr.as_u64() & 0xFFF; // 0xFFF is 12 bits
+
+    // Combine them for the exact byte address!
+    Some(x86_64::PhysAddr::new(frame_base + page_offset))
+}
+
+
