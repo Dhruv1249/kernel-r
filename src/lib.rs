@@ -111,12 +111,15 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
     // Clear the screen
     crate::vga_buffer::WRITER.lock().clear();
 
+    // Phyiscal offset
+    let phy_offset = crate::paging::PHYS_OFFSET;
+
     let stack_var = 0u64;
     let stack_addr = &stack_var as *const _ as u64;
-    let k_start = &raw const kernel_start as usize;
-    let k_end = &raw const kernel_end as usize;
-    let st_top = &raw const stack_top as usize;
-    let st_bottom = &raw const stack_bottom as usize;
+    let k_start = &raw const kernel_start as usize - phy_offset as usize;
+    let k_end = &raw const kernel_end as usize - phy_offset as usize;
+    let st_top = &raw const stack_top as usize - phy_offset as usize;
+    let st_bottom = &raw const stack_bottom as usize - phy_offset as usize;
    
     // Debug prints
     serial_println!("Stack bottom at {:#x}", &raw const stack_bottom as u64);
@@ -176,6 +179,31 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
     }
 
     let p4_table = paging::active_level_4_table();
+
+    // Remove 0x0 identity mapping
+
+    // Set p4 index 0 to 0
+    p4_table[0].set_unused();
+
+    // Flush the TLB fully so the CPU completely forgets about the old mapping
+    x86_64::instructions::tlb::flush_all();
+
+    serial_println!("Successfully severed the identity mapping");
+
+
+    // Setup guard page
+    // Setup guard page using the VIRTUAL address!
+    let virtual_st_bottom = &raw const stack_bottom as u64;
+    let guard_page_addr = x86_64::VirtAddr::new(virtual_st_bottom- 4096);
+    let guard_page: x86_64::structures::paging::Page = x86_64::structures::paging::Page::containing_address(guard_page_addr);
+
+    
+    crate::serial_println!("Mapping guard page");
+    if let Some(_page) = crate::paging::unmap(guard_page, p4_table){
+        serial_println!("Successfully unmapped the guard page");
+    } else {
+        serial_println!("Failed to unmap the guard page");
+    }
 
     use x86_64::VirtAddr;
     // Take absure virtual address for testing
@@ -246,7 +274,7 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
     test_string.push_str("Hello world");
     println!("Test string: {:?}", test_string);
   
-    // stack_overflow();
+    stack_overflow();
     // #[cfg(feature = "test")]
     // test_main();
 
@@ -254,9 +282,9 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
     loop{}
 }
 
-// fn stack_overflow() {
-//     stack_overflow();
-// }
+fn stack_overflow() {
+    stack_overflow();
+}
 //
 // fn testing() {
 //     assert_eq!(1, 1);

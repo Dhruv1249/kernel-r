@@ -4,7 +4,7 @@ use x86_64::registers::control::Cr3;
 use x86_64::structures::paging::{self, Page, PageTable, PageTableFlags, PhysFrame};
 
 
-pub const PHYS_OFFSET: u64 = 0; // TODO: Change to 0xFFFF_8000_0000_0000 in Phase 1
+pub const PHYS_OFFSET: u64 = 0xFFFF_8000_0000_0000; // Now the kernel in in the higher half of memory
 
 pub fn active_level_4_table() -> &'static mut PageTable {
     let cr3 = Cr3::read();

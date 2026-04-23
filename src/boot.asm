@@ -24,6 +24,7 @@ header_start:
 
 header_end:
 
+section .boot.text
 start:
 
 	;   Magic number put in eax by grub by default
@@ -151,6 +152,18 @@ set_up_page_tables:
 	;   Or to set last 2 bits to 1
 	or  eax, 0b11
 	mov [p4_table], eax
+  
+  ;   Map higher half of kernel
+  mov eax, p3_table
+  ;   Map the Higher Half (P4 Index 256 -> P3 Table)
+  ;   By doing this, 0xFFFF_8000_0000_0000 now resolves to the exact 
+  ;   same physical memory as 0x0!
+  or  eax, 0b11
+  ;   Each entry in the P4 table is 8 bytes long, so we need to offset
+  ;   Index 256 * 8 = 2048
+  mov [p4_table + 256 * 8], eax
+
+
 	mov eax, p2_table
 	or  eax, 0b11
 	mov [p3_table], eax
@@ -170,11 +183,11 @@ set_up_page_tables:
 	jne  .map_p1_table
 
 	;   Guard page
-	mov eax, guard_page
-	shr eax, 12; Divide by 4kb
-
-	mov dword [p1_table + eax * 8], 0; Clear lower 32 bits
-	mov dword [p1_table + eax * 8 + 4], 0; Clear upper 32 bits
+	; mov eax, guard_page
+	; shr eax, 12; Divide by 4kb
+	;
+	; mov dword [p1_table + eax * 8], 0; Clear lower 32 bits
+	; mov dword [p1_table + eax * 8 + 4], 0; Clear upper 32 bits
 
 	; mov ecx, 1; Start index from 1 since index 0 is already mapped by p1_table
 
@@ -195,12 +208,12 @@ set_up_page_tables:
 	cmp  ecx, 512
 	jne  .map_p1_table_2
 	;    Guard page — unmap page just below stack_bottom (0x237000)
-	mov  eax, stack_bottom
-	sub  eax, 4096
-	shr  eax, 12
-	sub  eax, 512; subtract 512 because p1_table_2 starts at 0x200000
-	mov  dword [p1_table_2 + eax * 8], 0
-	mov  dword [p1_table_2 + eax * 8 + 4], 0
+	; mov  eax, stack_bottom
+	; sub  eax, 4096
+	; shr  eax, 12
+	; sub  eax, 512; subtract 512 because p1_table_2 starts at 0x200000
+	; mov  dword [p1_table_2 + eax * 8], 0
+	; mov  dword [p1_table_2 + eax * 8 + 4], 0
 	mov  ecx, 2
 
 .map_p2_table:
@@ -226,12 +239,14 @@ long_mode_start:
 	mov gs, ax
 
 	;   2. Point the CPU's Stack Pointer to our new stack
-	mov rsp, stack_top
+	mov rax, stack_top
+  mov rsp, rax
 
 	;   3. Now it is safe to jump into Rust!
-	jmp _start
+  mov rax, _start
+	jmp rax 
 
-section .bss
+section .boot.bss
 
 	;     Defining page tables without it cpu won't start in 64 bit mode
 	;     Fun fact for our 4 level page table theoretical ram limit would be 256 TB
@@ -253,6 +268,10 @@ p1_table:
 p1_table_2:
 	resb 4096
 
+
+section .bss
+  align 4096
+
 guard_page:
 	resb 4096
 
@@ -266,7 +285,7 @@ stack_bottom:
 stack_top:
 
 	;       Some magic code for GDT (Global Descriptor Table)
-	section .rodata
+	section .boot.rodata
 
   cpu_not_supported_str: db "CPUID not supported. Error code: C", 0 ; Here 0 is the null character
   long_mode_not_supported_str: db "Long mode not supported. Error code: L", 0

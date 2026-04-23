@@ -170,7 +170,7 @@ pub fn allocate_zeroed_frame() -> Option<usize> {
     let frame_addr = allocate_frame()?; // The '?' returns None if out of memory
 
     // Cast the usize address into a raw mutable byte pointer
-    let ptr = frame_addr as *mut u8;
+    let ptr = ( frame_addr + crate::paging::PHYS_OFFSET as usize ) as *mut u8;
 
     // Zero out exactly 4096 bytes
     unsafe {
@@ -215,7 +215,7 @@ impl BitmapAllocator {
         if frames.is_none() {
             panic!("Not enough contiguous frames to allocate bitmap");
         }
-        let bitmap_ptr = frames.unwrap() as *mut u8;
+        let bitmap_ptr = ( frames.unwrap() + crate::paging::PHYS_OFFSET as usize ) as *mut u8;
 
         // Setting all frames to used
         use core::ptr::write_bytes;

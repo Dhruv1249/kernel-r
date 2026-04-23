@@ -36,7 +36,9 @@ extern "x86-interrupt" fn page_fault_handler(
         crate::serial_print!("EXCEPTION: PAGE FAULT\n{:#?}\n Error code: {:#?}", stack_frame, error_code);
         crate::serial_println!("EXPECTION: PAGE FAULT: OCCURED AT: {:#x}", fault_addr.as_u64());
         println!("EXCEPTION: PAGE FAULT\n{:#?}\n Error code: {:#?}", stack_frame, error_code);
-        return;
+        loop {
+            x86_64::instructions::hlt();
+        }
     }
 
     crate::serial_println!("Demand paging: Allocating fresh page for heap");
