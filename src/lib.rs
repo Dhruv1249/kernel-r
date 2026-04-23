@@ -217,9 +217,9 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
     use alloc::vec::Vec;
 
     // 1. Allocate 3 separate blocks (10,000 bytes each)
-    let vec1: Vec<u8> = Vec::with_capacity(10_000);
-    let vec2: Vec<u8> = Vec::with_capacity(10_000);
-    let vec3: Vec<u8> = Vec::with_capacity(10_000);
+    let vec1: Vec<u8> = Vec::with_capacity(10_000_00);
+    let vec2: Vec<u8> = Vec::with_capacity(10_000_00);
+    let vec3: Vec<u8> = Vec::with_capacity(10_000_00);
     crate::serial_println!("Allocated 3 vectors (10KB each).");
 
     //  Fragment the heap by dropping them out of order
@@ -235,7 +235,7 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
     //  The Ultimate Test: Ask for lagre amount of bytes. 
     // If coalescing failed, the heap is split into three 10K blocks, 
     // and this will instantly trigger an Out-Of-Memory panic!
-    let huge_vec: Vec<u8> = Vec::with_capacity(1024*99);
+    let huge_vec: Vec<u8> = Vec::with_capacity(1024*1023*10);
     crate::serial_println!("SUCCESS! Allocated huge vector of capacity: {}", huge_vec.capacity());
     crate::serial_println!("--- Heap Coalescing Works! ---");
 

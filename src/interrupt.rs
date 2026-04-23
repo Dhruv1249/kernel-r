@@ -27,7 +27,38 @@ extern "x86-interrupt" fn page_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: PageFaultErrorCode,
 ) {
-    panic!("EXCEPTION: PAGE FAULT\n{:#?}\n Error code: {:#?}", stack_frame, error_code);
+    // Faulting address
+    let fault_addr = x86_64::registers::control::Cr2::read();
+
+    let heap_start = crate::memory::HEAP_START as u64;
+    let heap_size = crate::memory::HEAP_SIZE as u64;
+    if fault_addr.as_u64() < heap_start || fault_addr.as_u64() >= heap_start + heap_size {
+        crate::serial_print!("EXCEPTION: PAGE FAULT\n{:#?}\n Error code: {:#?}", stack_frame, error_code);
+        crate::serial_println!("EXPECTION: PAGE FAULT: OCCURED AT: {:#x}", fault_addr.as_u64());
+        println!("EXCEPTION: PAGE FAULT\n{:#?}\n Error code: {:#?}", stack_frame, error_code);
+        return;
+    }
+
+    crate::serial_println!("Demand paging: Allocating fresh page for heap");
+
+    let page: x86_64::structures::paging::Page<> = x86_64::structures::paging::Page::containing_address(
+        fault_addr
+    );
+    
+    // Get 4kb zeroed frame from bitmap allocator
+    let frame_addr = crate::memory::allocate_zeroed_frame().expect("FATAL ERROR: Out of memory");
+
+    let physical_addr: x86_64::structures::paging::PhysFrame<> = x86_64::structures::paging::PhysFrame::containing_address(
+        x86_64::PhysAddr::new(frame_addr as u64)
+    );
+
+    // Get active page table and map it
+    let active_table = crate::paging::active_level_4_table();
+    let flags = x86_64::structures::paging::PageTableFlags::PRESENT| x86_64::structures::paging::PageTableFlags::WRITABLE;
+
+    crate::paging::map_to(page, physical_addr, flags, active_table);
+
+    return;
 }
 
 use x86_64::structures::idt::InterruptStackFrame;

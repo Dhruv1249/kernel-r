@@ -1,5 +1,7 @@
 // src/memory.rs
 
+use core::usize;
+
 use crate::boot_info::MemoryMapEntry;
 
 pub struct BumpAllocator {
@@ -152,6 +154,13 @@ pub fn allocate_frame() -> Option<usize> {
         allocator.allocate_frame()
     } else {
         None
+    }
+}
+
+pub fn clear_frame(frame_addr: usize) {
+    let mut lock = ALLOCATOR.lock();
+    if let Some(allocator) = lock.as_mut() {
+        allocator.clear_frame(frame_addr);
     }
 }
 
@@ -335,35 +344,55 @@ impl BitmapAllocator {
         }
         None // Out of memory
     }
+
+    pub fn clear_frame(&mut self, phys_addr: usize) {
+        if phys_addr % 4096 != 0 {
+            panic!(
+                "Tried to clear a non aligned frame address {:#x}",
+                phys_addr
+            );
+        }
+
+        let frame_index = phys_addr / 4096;
+        if frame_index >= self.total_frames {
+            panic!(
+                "FATAL: Attempted to clear physical address {:#x} which is outside the ram limits",
+                phys_addr
+            );
+        }
+
+        self.clear_bit(frame_index);
+    }
 }
 
 // Comically large number easy to debug
 pub const HEAP_START: usize = 0x_4444_4444_0000;
-pub const HEAP_SIZE: usize = 1024 * 100; // 100 KB
+pub const HEAP_SIZE: usize = 0xA00000; // 10 MB
 
-pub fn init_heap(p4_table: &mut x86_64::structures::paging::PageTable) {
-    let heap_start_page = x86_64::structures::paging::page::Page::containing_address(
-        x86_64::VirtAddr::new(HEAP_START as u64),
-    );
-    let heap_end_page = x86_64::structures::paging::page::Page::containing_address(
-        x86_64::VirtAddr::new((HEAP_START + HEAP_SIZE - 1) as u64),
-    );
-    let heap_range =
-        x86_64::structures::paging::Page::range_inclusive(heap_start_page, heap_end_page);
-
-    for page in heap_range {
-        let frame = allocate_frame();
-        if frame.is_none() {
-            panic!("Out of memory in heap");
-        }
-        let frame_addr = frame.unwrap();
-
-        let phys_address = x86_64::PhysAddr::new(frame_addr as u64);
-        let flags = x86_64::structures::paging::PageTableFlags::PRESENT
-            | x86_64::structures::paging::PageTableFlags::WRITABLE;
-        let physical_frame = x86_64::structures::paging::PhysFrame::containing_address(phys_address);
-        
-
-        crate::paging::map_to(page, physical_frame, flags, p4_table);
-    }
+pub fn init_heap(_p4_table: &mut x86_64::structures::paging::PageTable) {
+    // let heap_start_page = x86_64::structures::paging::page::Page::containing_address(
+    //     x86_64::VirtAddr::new(HEAP_START as u64),
+    // );
+    // let heap_end_page = x86_64::structures::paging::page::Page::containing_address(
+    //     x86_64::VirtAddr::new((HEAP_START + HEAP_SIZE - 1) as u64),
+    // );
+    // let heap_range =
+    //     x86_64::structures::paging::Page::range_inclusive(heap_start_page, heap_end_page);
+    //
+    // for page in heap_range {
+    //     let frame = allocate_frame();
+    //     if frame.is_none() {
+    //         panic!("Out of memory in heap");
+    //     }
+    //     let frame_addr = frame.unwrap();
+    //
+    //     let phys_address = x86_64::PhysAddr::new(frame_addr as u64);
+    //     let flags = x86_64::structures::paging::PageTableFlags::PRESENT
+    //         | x86_64::structures::paging::PageTableFlags::WRITABLE;
+    //     let physical_frame =
+    //         x86_64::structures::paging::PhysFrame::containing_address(phys_address);
+    //
+    //     crate::paging::map_to(page, physical_frame, flags, p4_table);
+    // }
+    crate::serial_print!("Dynamic heap initialized. Waiting for heap allocation");
 }
