@@ -58,7 +58,8 @@ extern "x86-interrupt" fn page_fault_handler(
     let active_table = crate::paging::active_level_4_table();
     let flags = x86_64::structures::paging::PageTableFlags::PRESENT| x86_64::structures::paging::PageTableFlags::WRITABLE;
 
-    crate::paging::map_to(page, physical_addr, flags, active_table);
+    crate::paging::map_to(page, physical_addr, flags, active_table)
+        .expect("FATAL: demand paging failed to map page");
 
     return;
 }

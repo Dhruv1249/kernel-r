@@ -18,7 +18,7 @@ pub struct BumpAllocator {
     kernel_end: usize,
 }
 
-pub struct exclusion_zones {
+pub struct ExclusionZones {
     mbi_start: usize,
     mbi_end: usize,
     stack_start: usize,
@@ -131,8 +131,8 @@ impl BumpAllocator {
         None
     }
 
-    pub fn get_exclusion_zones(&self) -> exclusion_zones {
-        exclusion_zones {
+    pub fn get_exclusion_zones(&self) -> ExclusionZones {
+        ExclusionZones {
             mbi_start: self.mbi_start,
             mbi_end: self.mbi_end,
             stack_start: self.stack_start,

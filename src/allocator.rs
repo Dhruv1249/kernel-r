@@ -90,7 +90,7 @@ impl LinkedListAllocator {
         let mut current = &mut self.head;
 
         // Traverse the list
-        while let Some(mut region) = current.next.take() {
+        while let Some(region) = current.next.take() {
             if let Some(alloc_start) =
                 Self::alloc_from_region(region as *const _ as usize, region.size, size, align)
             {
@@ -130,11 +130,12 @@ impl LinkedListAllocator {
     }
 
     pub fn dealloc(&mut self, ptr: *mut u8, layout: core::alloc::Layout) {
+        let head_addr = &self.head as *const ListNode as usize;
         let (size, _) = LinkedListAllocator::size_align(layout);
         let free_ptr = ptr as usize;
         let mut current = &mut self.head;
 
-        while let Some(mut region) = current.next.take() {
+        while let Some(region) = current.next.take() {
             let next_start = region as *const _ as usize;
             // If the next region starts after the free pointer, we are done
             if next_start > free_ptr as usize {
@@ -147,7 +148,8 @@ impl LinkedListAllocator {
 
         let current_addr = current as *const _ as usize;
 
-        let merges_left = current_addr + current.size == free_ptr;
+        let is_head = current as *const _ as usize == head_addr;
+        let merges_left = !is_head && (current_addr + current.size == free_ptr);
 
         let merges_right = if let Some(ref mut next_region) = current.next {
             free_ptr + size == (*next_region) as *const _ as usize
