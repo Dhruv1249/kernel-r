@@ -30,13 +30,16 @@ mod interrupt;
 mod qemu;
 mod serial;
 mod vga_buffer;
+mod apic;
 mod boot_info;
 mod memory;
 mod paging;
 mod allocator;
-use core:: panic::PanicInfo;
+use core::{ panic::PanicInfo};
 
-use crate::{memory::ALLOCATOR, qemu::exit_qemu};
+use x86_64::structures::paging::Size4KiB;
+
+use crate:: qemu::exit_qemu;
 
 
 fn dump_registers() {
@@ -44,7 +47,7 @@ fn dump_registers() {
     let rflags = x86_64::registers::rflags::read();
     serial_println!("rflags: {:#x}", rflags.bits());
     let rip = x86_64::registers::control::Cr2::read();
-    serial_println!("rip: {:#x}", rip);
+    serial_println!("Faulting virtual addr: {:#x}", rip);
     let mut rsp: u64;
     unsafe {
         core::arch::asm!("mov {}, rsp", out(reg) rsp);
@@ -74,6 +77,16 @@ fn panic(info: &PanicInfo) -> ! {
         x86_64::instructions::hlt(); // Puts the CPU to sleep until the next interrupt (which won't matter here)
     }
 }
+
+pub unsafe fn validate_checksum(start_ptr: *const u8, length: usize) -> bool {
+    let mut checksum: u8 = 0;
+    for i in 0..length {
+        let val = unsafe { core::ptr::read_unaligned(start_ptr.add(i)) };
+        checksum = checksum.wrapping_add(val);
+    }
+    checksum == 0
+}
+
 
 
 // Defining our global heap
@@ -176,6 +189,153 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
             serial_print!("Allocating frame3: {:#x?}\n", crate::memory::allocate_frame()); 
 
         }
+        
+        
+    }
+
+    for tag in  boot_info::TagIterator::new(multiboot_info_addr) {
+        let tag_header = unsafe { &*tag };
+
+        // ACPI Old RSDP Version 1
+        if tag_header.typ == 14 {
+            crate::serial_println!("ACPI 1.0 RSDP Found at {:#x}", tag as usize);
+            let rsdp = unsafe { &*(tag as *const boot_info::AcpiV1Tag) };
+            // Safely copy the unaligned fields into aligned local variables
+            let signature = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(rsdp.signature)) };
+            let rsdt_addr = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(rsdp.rsdt_address)) };
+            crate::serial_println!("RSDP Signature: {:#?}", signature);
+            crate::serial_println!("RSDP Checksum: {:#x}", rsdp.checksum);
+            crate::serial_println!("RSDP OEM ID: {:#?}", rsdp.oem_id);
+            crate::serial_println!("RSDP Revision: {:#x}", rsdp.revision);
+            crate::serial_println!("RSDP RSDT Address: {:#x}", rsdt_addr);
+
+            let rsdt_virt_addr = x86_64::VirtAddr::new(rsdt_addr as u64+crate::paging::PHYS_OFFSET );
+            let sdt_header = unsafe { &*(rsdt_virt_addr.as_mut_ptr::<boot_info::SdtHeader>()) };
+            let is_valid = unsafe { 
+                crate::validate_checksum(
+                    sdt_header as *const _ as *const u8, 
+                    sdt_header.length as usize
+                ) 
+            };
+            
+            if !is_valid {
+                crate::serial_println!("WARNING: SDT Checksum failed!");
+                panic!("SDT Checksum failed!");
+            }
+            let sdt_signature = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(sdt_header.signature)) };
+            crate::serial_println!("SDT Signature: {:#?}", sdt_signature);
+            let num_entries = (sdt_header.length as usize - core::mem::size_of::<boot_info::SdtHeader>() as usize) / 4;
+            let start_ptr = (rsdt_virt_addr.as_u64() + core::mem::size_of::<boot_info::SdtHeader>() as u64) as *const u32;
+
+            for i in 0..num_entries {
+                let entry = unsafe { core::ptr::read_unaligned(start_ptr.add(i)) };
+                crate::serial_println!("Entry: {:#x}", entry);
+                let entry_virt_addr = x86_64::VirtAddr::new(entry as u64+crate::paging::PHYS_OFFSET );
+                let sdt_header = unsafe { &*(entry_virt_addr.as_ptr::<boot_info::SdtHeader>()) };
+                let sdt_signature = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(sdt_header.signature)) };
+                if sdt_signature == [b'A', b'P', b'I', b'C'] {
+                    crate::serial_println!("Found APIC SDT at {:#x}", entry);
+                    let apic_virt_addr = x86_64::VirtAddr::new(entry as u64+crate::paging::PHYS_OFFSET );
+                    let apic_header = unsafe { &*(apic_virt_addr.as_ptr::<boot_info::Madt>()) };
+                    let local_apic_addr = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(apic_header.local_apic_address)) };
+                    crate::serial_println!("Local APIC Address: {:#x}", local_apic_addr);
+
+                    let phys_addr = x86_64::PhysAddr::new(local_apic_addr as u64);
+                    let virt_addr = x86_64::VirtAddr::new(local_apic_addr as u64 + crate::paging::PHYS_OFFSET);
+
+                    let page: x86_64::structures::paging::Page<Size4KiB> = x86_64::structures::paging::Page::containing_address(virt_addr);
+                    let frame: x86_64::structures::paging::PhysFrame<Size4KiB> = x86_64::structures::paging::PhysFrame::containing_address(phys_addr);
+
+                    let flags = x86_64::structures::paging::PageTableFlags::PRESENT 
+                        | x86_64::structures::paging::PageTableFlags::WRITABLE
+                        | x86_64::structures::paging::PageTableFlags::NO_CACHE
+                        | x86_64::structures::paging::PageTableFlags::WRITE_THROUGH;
+
+                    crate::paging::map_to(page, frame, flags, crate::paging::active_level_4_table()).expect("Failed to map APIC page");
+                    // Initialize the APIC abstraction
+                    let local_apic = unsafe { crate::apic::LocalApic::new(virt_addr) };
+
+                    // Turn the hardware on
+                    unsafe{ local_apic.init(); }
+
+                    // Store it globally for the interrupt handlers
+                    *crate::apic::LOCAL_APIC.lock() = Some(local_apic);
+                    crate::serial_println!("Local APIC initialized and enabled!");
+
+                }
+            }
+            
+        }
+        // ACPI New RSDP Version 2
+        else if tag_header.typ == 15 {
+            crate::serial_println!("ACPI 2.0 RSDP Found at {:#x}", tag as usize);
+            let rsdpv2 = unsafe { &*(tag as *const boot_info::AcpiV2Tag) };
+            let xsdt_addr = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(rsdpv2.xsdt_address)) };
+            crate::serial_println!("RSDP Signature: {:#?}", rsdpv2.signature);
+            crate::serial_println!("RSDP Checksum: {:#x}", rsdpv2.checksum);
+            crate::serial_println!("RSDP OEM ID: {:#?}", rsdpv2.oem_id);
+            crate::serial_println!("RSDP Revision: {:#x}", rsdpv2.revision);
+            crate::serial_println!("RSDP XSDT Address: {:#x}",xsdt_addr);
+            let xsdt_virt_addr = x86_64::VirtAddr::new(xsdt_addr as u64+crate::paging::PHYS_OFFSET );
+            let sdt_header = unsafe { &*(xsdt_virt_addr.as_mut_ptr::<boot_info::SdtHeader>()) };
+             let is_valid = unsafe { 
+                crate::validate_checksum(
+                    sdt_header as *const _ as *const u8, 
+                    sdt_header.length as usize
+                ) 
+            };
+            
+            if !is_valid {
+                crate::serial_println!("WARNING: SDT Checksum failed!");
+                panic!("SDT Checksum failed!");
+            }
+
+            let sdt_signature = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(sdt_header.signature)) };
+            crate::serial_println!("SDT Signature: {:#?}", sdt_signature);
+
+            let num_entries = (sdt_header.length as usize - core::mem::size_of::<boot_info::SdtHeader>() as usize) / 8;
+            let start_ptr = (xsdt_virt_addr.as_u64() + core::mem::size_of::<boot_info::SdtHeader>() as u64) as *const u64;
+            for i in 0..num_entries {
+                let entry = unsafe { core::ptr::read_unaligned(start_ptr.add(i)) };
+                crate::serial_println!("Entry: {:#x}", entry);
+                let entry_virt_addr = x86_64::VirtAddr::new(entry as u64+crate::paging::PHYS_OFFSET );
+                let sdt_header = unsafe { &*(entry_virt_addr.as_ptr::<boot_info::SdtHeader>()) };
+                let sdt_signature = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(sdt_header.signature)) };
+                if sdt_signature == [b'A', b'P', b'I', b'C'] {
+                    crate::serial_println!("Found APIC SDT at {:#x}", entry);
+                    let apic_virt_addr = x86_64::VirtAddr::new(entry as u64+crate::paging::PHYS_OFFSET );
+                    let apic_header = unsafe { &*(apic_virt_addr.as_ptr::<boot_info::Madt>()) };
+                    let local_apic_addr = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(apic_header.local_apic_address)) };
+                    crate::serial_println!("Local APIC Address: {:#x}", local_apic_addr);
+
+                    let phys_addr = x86_64::PhysAddr::new(local_apic_addr as u64);
+                    let virt_addr = x86_64::VirtAddr::new(local_apic_addr as u64 + crate::paging::PHYS_OFFSET);
+
+                    let page: x86_64::structures::paging::Page<Size4KiB> = x86_64::structures::paging::Page::containing_address(virt_addr);
+                    let frame: x86_64::structures::paging::PhysFrame<Size4KiB> = x86_64::structures::paging::PhysFrame::containing_address(phys_addr);
+
+                    // We dont want to cache the APIC page
+                    let flags = x86_64::structures::paging::PageTableFlags::PRESENT 
+                        | x86_64::structures::paging::PageTableFlags::WRITABLE
+                        | x86_64::structures::paging::PageTableFlags::NO_CACHE
+                        | x86_64::structures::paging::PageTableFlags::WRITE_THROUGH;
+
+                    crate::paging::map_to(page, frame, flags, crate::paging::active_level_4_table()).expect("Failed to map APIC page");
+
+                    // Initialize the APIC abstraction
+                    let local_apic = unsafe { crate::apic::LocalApic::new(virt_addr) };
+
+                    // Turn the hardware on
+                    unsafe{ local_apic.init(); }
+
+                    // Store it globally for the interrupt handlers
+                    *crate::apic::LOCAL_APIC.lock() = Some(local_apic);
+                    crate::serial_println!("Local APIC initialized and enabled!");
+
+                }
+            }
+            
+        }   
     }
 
     let p4_table = paging::active_level_4_table();

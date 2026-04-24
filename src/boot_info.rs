@@ -60,3 +60,55 @@ pub struct MemoryMapTag {
     pub entry_size: u32,
     pub entry_version: u32,
 }
+
+// We don't want compiler to add padding bytes
+#[repr(C, packed)]
+pub struct AcpiV1Tag {
+    pub typ: u32,
+    pub size: u32,
+    // --- RSDP Structure begins here ---
+    pub signature: [u8; 8], // "RSD PTR "
+    pub checksum: u8,
+    pub oem_id: [u8; 6],
+    pub revision: u8,
+    pub rsdt_address: u32,  // The physical address of the RSDT!
+}
+
+// We don't want compiler to add padding bytes
+#[repr(C, packed)]
+pub struct AcpiV2Tag {
+    pub typ: u32,
+    pub size: u32,
+    // --- RSDP Version 2 Structure begins here ---
+    pub signature: [u8; 8],
+    pub checksum: u8,
+    pub oem_id: [u8; 6],
+    pub revision: u8,
+    pub rsdt_address: u32,  // Kept for backward compatibility
+    pub length: u32,
+    pub xsdt_address: u64,  // <- This is the one we actually want!
+    pub extended_checksum: u8,
+    pub reserved: [u8; 3],
+}
+
+#[repr(C, packed)]
+pub struct SdtHeader {
+    pub signature: [u8; 4],
+    pub length: u32,
+    pub revision: u8,
+    pub checksum: u8,
+    pub oem_id: [u8; 6],
+    pub oem_table_id: [u8; 8],
+    pub oem_revision: u32,
+    pub creator_id: u32,
+    pub creator_revision: u32,
+}
+
+// Multiple APIC Description Table (MADT)
+#[repr(C, packed)]
+pub struct Madt {
+    pub header: SdtHeader,
+    pub local_apic_address: u32, // The physical MMIO address of the Local APIC
+    pub flags: u32,
+    // Variable-length interrupt controller structures follow here...
+}
