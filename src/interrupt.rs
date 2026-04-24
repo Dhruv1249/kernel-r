@@ -12,6 +12,7 @@ pub fn load_idt() {
         let mut idt = InterruptDescriptorTable::new();
         idt.breakpoint.set_handler_fn(breakpoint_handler);
         idt.page_fault.set_handler_fn(page_fault_handler);
+        idt[32].set_handler_fn(tick_handler);
         unsafe {
             idt.double_fault
                 .set_handler_fn(double_fault_handler)
@@ -76,4 +77,10 @@ extern "x86-interrupt" fn double_fault_handler(
     _error_code: u64,
 ) -> ! {
     panic!("EXCEPTION: DOUBLE FAULT\n{:#?}", stack_frame);
+}
+
+
+extern "x86-interrupt" fn tick_handler(stack_frame: InterruptStackFrame) {
+    crate::print!(".");
+    crate::apic::LOCAL_APIC.lock().as_ref().unwrap().end_of_interrupt();
 }

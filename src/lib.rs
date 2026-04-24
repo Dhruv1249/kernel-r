@@ -211,6 +211,7 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
 
             let rsdt_virt_addr = x86_64::VirtAddr::new(rsdt_addr as u64+crate::paging::PHYS_OFFSET );
             let sdt_header = unsafe { &*(rsdt_virt_addr.as_mut_ptr::<boot_info::SdtHeader>()) };
+            // Validate the checksum before using it
             let is_valid = unsafe { 
                 crate::validate_checksum(
                     sdt_header as *const _ as *const u8, 
@@ -278,7 +279,8 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
             crate::serial_println!("RSDP XSDT Address: {:#x}",xsdt_addr);
             let xsdt_virt_addr = x86_64::VirtAddr::new(xsdt_addr as u64+crate::paging::PHYS_OFFSET );
             let sdt_header = unsafe { &*(xsdt_virt_addr.as_mut_ptr::<boot_info::SdtHeader>()) };
-             let is_valid = unsafe { 
+            // Validate the checksum before using it
+            let is_valid = unsafe { 
                 crate::validate_checksum(
                     sdt_header as *const _ as *const u8, 
                     sdt_header.length as usize
@@ -378,7 +380,7 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
 
     //  Map them together!
     use x86_64::structures::paging::PageTableFlags;
-    crate::paging::map_to(page, frame, PageTableFlags::WRITABLE, p4_table);
+    crate::paging::map_to(page, frame, PageTableFlags::WRITABLE, p4_table).expect("Failed to map page");
 
     // Test the mapping by writing to the VIRTUAL address
     crate::serial_println!("Mapping successful! Writing to virtual address...");
@@ -433,7 +435,24 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
     let mut test_string = String::new();
     test_string.push_str("Hello world");
     println!("Test string: {:?}", test_string);
-  
+
+    // Disable the legacy PIC
+    // Since its hardware timer is mapped to IRQ 0, which is mapped to Vector 8
+    // In modern x86_64 vector 8 is used for double faults so it will esentially
+    // instantly crash if not disabled
+    // After disabling the legacy PIC, it will be mapped to Vector 32
+    unsafe { crate::apic::disable_legacy_pic() };
+
+    crate::apic::LOCAL_APIC.lock().as_ref().unwrap().start_timer();
+
+    // Set the CPU's Interrupt Flag (sti) so it actually listens to the APIC
+    x86_64::instructions::interrupts::enable();
+
+    crate::serial_println!("Interrupts enabled. Waiting for timer...");
+    loop {
+        x86_64::instructions::hlt();
+    }  
+     
     // stack_overflow();
     // #[cfg(feature = "test")]
     // test_main();
