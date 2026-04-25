@@ -112,3 +112,18 @@ pub struct Madt {
     pub flags: u32,
     // Variable-length interrupt controller structures follow here...
 }
+
+#[repr(C, packed)]
+pub struct MadtRecordHeader {
+    pub entry_type: u8,
+    pub record_length: u8,
+}
+
+#[repr(C, packed)]
+pub struct IoApicRecord {
+    pub header: MadtRecordHeader,
+    pub io_apic_id: u8,
+    pub reserved: u8,
+    pub io_apic_address: u32, // The physical MMIO address!
+    pub global_system_interrupt_base: u32,
+}
