@@ -27,6 +27,7 @@ extern crate alloc;
 // Our imports here.
 mod gdt;
 mod interrupt;
+mod keyboard;
 mod qemu;
 mod serial;
 mod vga_buffer;

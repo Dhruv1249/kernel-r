@@ -95,8 +95,15 @@ extern "x86-interrupt" fn keyboard_handler(stack_frame: InterruptStackFrame) {
     let scancode: u8 = unsafe { port.read() };
     
     crate::serial_println!("Key pressed! Scancode: {}", scancode);
-    crate::println!("KEY: {}", scancode);
-
-    // CRITICAL: Acknowledge the interrupt to the Local APIC!
+    let mut keyboard = crate::keyboard::KEYBOARD.lock();
+    if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
+        // 2. If it formed a complete key press/release, process it
+        if let Some(key) = keyboard.process_keyevent(key_event) {
+            match key {
+                pc_keyboard::DecodedKey::Unicode(character) => crate::print!("{}", character),
+                pc_keyboard::DecodedKey::RawKey(key) => crate::print!("{:?}", key),
+            }
+        }
+    }    // CRITICAL: Acknowledge the interrupt to the Local APIC!
     crate::apic::LOCAL_APIC.lock().as_ref().unwrap().end_of_interrupt();
 }
