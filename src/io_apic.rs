@@ -37,4 +37,26 @@ impl IoApic {
             core::ptr::write_volatile(data_ptr, value);
         }
     }
+
+    pub unsafe fn init_keyboard(&self) {
+        // IO APIC Redirection Table Base Index
+        const REDTBL_INDEX: u8 = 0x10;
+
+        // IRQ 1 is the keyboard
+        let irq: u8 = 1;
+        let lower_index = REDTBL_INDEX + (irq * 2);
+        let upper_index = REDTBL_INDEX + (irq * 2) + 1;
+
+        unsafe {
+            // 1. Write the Upper Half (Destination Core)
+            // In a single-core system, APIC ID 0 is the Bootstrap Processor (BSP)
+            self.write_reg(upper_index, 0);
+
+            // 2. Write the Lower Half (Vector and Configuration)
+            // We want to send this to Vector 33 on the Local APIC.
+            // By writing exactly 33, we are leaving the 16th bit (the Mask bit) as 0,
+            // which officially unmasks/enables the interrupt.
+            self.write_reg(lower_index, 33);
+        }
+    }
 }

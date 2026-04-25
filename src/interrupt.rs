@@ -13,6 +13,7 @@ pub fn load_idt() {
         idt.breakpoint.set_handler_fn(breakpoint_handler);
         idt.page_fault.set_handler_fn(page_fault_handler);
         idt[32].set_handler_fn(tick_handler);
+        idt[33].set_handler_fn(keyboard_handler);
         unsafe {
             idt.double_fault
                 .set_handler_fn(double_fault_handler)
@@ -81,6 +82,21 @@ extern "x86-interrupt" fn double_fault_handler(
 
 
 extern "x86-interrupt" fn tick_handler(stack_frame: InterruptStackFrame) {
-    crate::print!(".");
+    // crate::print!(".");
+    crate::apic::LOCAL_APIC.lock().as_ref().unwrap().end_of_interrupt();
+}
+
+extern "x86-interrupt" fn keyboard_handler(stack_frame: InterruptStackFrame) {
+    use x86_64::instructions::port::Port;
+
+    // The keyboard data port is 0x60
+    let mut port = Port::<u8>::new(0x60);
+    
+    let scancode: u8 = unsafe { port.read() };
+    
+    crate::serial_println!("Key pressed! Scancode: {}", scancode);
+    crate::println!("KEY: {}", scancode);
+
+    // CRITICAL: Acknowledge the interrupt to the Local APIC!
     crate::apic::LOCAL_APIC.lock().as_ref().unwrap().end_of_interrupt();
 }

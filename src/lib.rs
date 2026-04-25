@@ -430,10 +430,11 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
     // Set the CPU's Interrupt Flag (sti) so it actually listens to the APIC
     x86_64::instructions::interrupts::enable();
 
-    crate::serial_println!("Interrupts enabled. Waiting for timer...");
-    loop {
-        x86_64::instructions::hlt();
-    }  
+    // NEW: Unmask the keyboard!
+    unsafe { crate::io_apic::IO_APIC.lock().as_ref().unwrap().init_keyboard(); }
+
+    // Set the CPU's Interrupt Flag (sti)
+    x86_64::instructions::interrupts::enable(); 
      
     // stack_overflow();
     // #[cfg(feature = "test")]
