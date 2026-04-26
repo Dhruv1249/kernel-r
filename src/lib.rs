@@ -34,6 +34,7 @@ mod vga_buffer;
 mod io_apic;
 mod apic;
 mod boot_info;
+mod queue;
 mod memory;
 mod paging;
 mod allocator;
@@ -433,16 +434,27 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
 
     // NEW: Unmask the keyboard!
     unsafe { crate::io_apic::IO_APIC.lock().as_ref().unwrap().init_keyboard(); }
+    crate::serial_println!("Interrupts enabled. Waiting for keyboard input...");
+    loop {
+        // Pop events off the queue and print them!
+        if let Some(key_event) = crate::keyboard::KEYBOARD_EVENTS.pop() {
+             match key_event {
+                 pc_keyboard::DecodedKey::Unicode(character) => crate::print!("{}", character),
+                 pc_keyboard::DecodedKey::RawKey(key) => crate::print!("{:?}", key),
+             }
+        } else {
+             // If the queue is empty, put the CPU to sleep to save power
+             x86_64::instructions::hlt();
+        }
+    }
 
-    // Set the CPU's Interrupt Flag (sti)
-    x86_64::instructions::interrupts::enable(); 
      
     // stack_overflow();
     // #[cfg(feature = "test")]
     // test_main();
 
 
-    loop{}
+    // loop{}
 }
 
 // fn stack_overflow() {
