@@ -12,8 +12,26 @@ pub fn load_idt() {
         let mut idt = InterruptDescriptorTable::new();
         idt.breakpoint.set_handler_fn(breakpoint_handler);
         idt.page_fault.set_handler_fn(page_fault_handler);
+        // Interrupt handler for managing the timer interrupt
         idt[32].set_handler_fn(tick_handler);
         idt[33].set_handler_fn(keyboard_handler);
+        // General Protection Fault (#GP - Vector 13): Catches memory protection 
+        // and privilege violations, such as accessing non-canonical addresses or
+        // a user-space program trying to touch kernel memory.
+        idt.general_protection_fault.set_handler_fn(general_protection_failure_handler);
+        // Stack Segment Fault (#SS - Vector 12): Catches errors strictly related to the 
+        // stack, such as the stack pointer (rsp) becoming corrupted, misaligned, or 
+        // overflowing its mapped memory.
+        idt.stack_segment_fault.set_handler_fn(stack_segment_fault_handler);
+        // Invalid Opcode (#UD - Vector 6): Catches illegal or unknown CPU instructions,
+        // which almost always happens when a bad pointer causes the CPU to jump into 
+        // random data and try to execute it as code.
+        idt.invalid_opcode.set_handler_fn(invaild_opcode_handler);
+        // Non-Maskable Interrupt (#NMI - Vector 2): Catches catastrophic, unrecoverable 
+        // physical hardware errors (like RAM parity failures) and bypasses the CPU's 
+        // interrupt flag (sti/cli) so it cannot be ignored.
+        idt.non_maskable_interrupt.set_handler_fn(non_maskable_interrupt_handler);
+        // Double Fault
         unsafe {
             idt.double_fault
                 .set_handler_fn(double_fault_handler)
@@ -81,12 +99,12 @@ extern "x86-interrupt" fn double_fault_handler(
 }
 
 
-extern "x86-interrupt" fn tick_handler(stack_frame: InterruptStackFrame) {
+extern "x86-interrupt" fn tick_handler(_stack_frame: InterruptStackFrame) {
     // crate::print!(".");
     crate::apic::LOCAL_APIC.lock().as_ref().unwrap().end_of_interrupt();
 }
 
-extern "x86-interrupt" fn keyboard_handler(stack_frame: InterruptStackFrame) {
+extern "x86-interrupt" fn keyboard_handler(_stack_frame: InterruptStackFrame) {
     use x86_64::instructions::port::Port;
 
     // The keyboard data port is 0x60
@@ -104,4 +122,21 @@ extern "x86-interrupt" fn keyboard_handler(stack_frame: InterruptStackFrame) {
         }
     }    // CRITICAL: Acknowledge the interrupt to the Local APIC!
     crate::apic::LOCAL_APIC.lock().as_ref().unwrap().end_of_interrupt();
+}
+
+
+extern "x86-interrupt" fn general_protection_failure_handler(stack_frame: InterruptStackFrame, error_code: u64) {
+    panic!("EXCEPTION: GENERAL PROTECTION FAILURE\n{:#?}\n error code: {:#?}", stack_frame, error_code);
+}
+
+extern "x86-interrupt" fn stack_segment_fault_handler(stack_frame: InterruptStackFrame, error_code: u64) {
+    panic!("EXCEPTION: STACK SEGMENT FAULT\n{:#?}\n error code: {:#?}", stack_frame, error_code);
+}
+
+extern "x86-interrupt" fn invaild_opcode_handler(stack_frame: InterruptStackFrame ) {
+    panic!("EXCEPTION: INVALID OPCODE\n{:#?}", stack_frame);
+}
+
+extern "x86-interrupt" fn non_maskable_interrupt_handler(stack_frame: InterruptStackFrame ) {
+    panic!("EXCEPTION: NON MASKABLE INTERRUPT\n{:#?}", stack_frame);
 }

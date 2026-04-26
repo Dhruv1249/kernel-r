@@ -4,12 +4,12 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 // Single producer, single consumer (SPSC) ring buffer
 pub struct RingBuffer<T, const N: usize> {
-    buffer: core::cell::UnsafeCell< [Option<T>; N]>,
+    buffer: core::cell::UnsafeCell<[Option<T>; N]>,
     head: AtomicUsize,
     tail: AtomicUsize,
 }
 
-impl<T: , const N: usize> RingBuffer<T, N> {
+impl<T, const N: usize> RingBuffer<T, N> {
     const INIT: Option<T> = None;
     pub const fn new() -> Self {
         Self {
@@ -28,7 +28,9 @@ impl<T: , const N: usize> RingBuffer<T, N> {
         if next_head == tail {
             return Err(item);
         }
-       unsafe {  (*self.buffer.get())[head] = Some(item); }
+        unsafe {
+            (*self.buffer.get())[head] = Some(item);
+        }
         self.head.store(next_head, Ordering::Release);
 
         Ok(())
@@ -44,7 +46,9 @@ impl<T: , const N: usize> RingBuffer<T, N> {
             return None;
         }
         let item = unsafe { (*self.buffer.get())[tail].take() };
-        unsafe { (*self.buffer.get())[tail] = None; }
+        unsafe {
+            (*self.buffer.get())[tail] = None;
+        }
         self.tail.store(next_tail, Ordering::Release);
 
         item
