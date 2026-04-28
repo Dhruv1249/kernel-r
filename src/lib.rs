@@ -36,6 +36,7 @@ mod apic;
 mod boot_info;
 mod queue;
 mod memory;
+mod process;
 mod paging;
 mod allocator;
 use core::{ panic::PanicInfo};
@@ -409,7 +410,7 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
     //  The Ultimate Test: Ask for lagre amount of bytes. 
     // If coalescing failed, the heap is split into three 10K blocks, 
     // and this will instantly trigger an Out-Of-Memory panic!
-    let huge_vec: Vec<u8> = Vec::with_capacity(1024*1023*10);
+    let huge_vec: Vec<u8> = Vec::with_capacity(1024*10);
     crate::serial_println!("SUCCESS! Allocated huge vector of capacity: {}", huge_vec.capacity());
     crate::serial_println!("--- Heap Coalescing Works! ---");
 
@@ -434,6 +435,33 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
 
     // NEW: Unmask the keyboard!
     unsafe { crate::io_apic::IO_APIC.lock().as_ref().unwrap().init_keyboard(); }
+    let mut task_a = crate::process::Task {
+        id: 0,
+        stack_pointer: 0,
+        context: crate::process::TaskContext::default(),
+        state: crate::process::TaskState::Running,
+        page_table: 0,
+        stack: alloc::vec::Vec::new(), // Empty, we are using the boot stack
+    };
+
+    // 2. Create the real Task B, pointing to our example function
+    let task_b = crate::process::Task::new(example_task as u64);
+
+    crate::serial_println!("Initiating Context Switch...");
+
+    // 3. Pull the trigger!
+    unsafe {
+        crate::process::switch_task(
+            &mut task_a.context,
+            &mut task_a.stack_pointer,
+            &task_b.context,
+            task_b.stack_pointer,
+        );
+    }
+
+    // If the switch works, the CPU jumps to Task B, and this line NEVER PRINTS.
+    crate::serial_println!("FATAL: If you see this, the context switch failed.");
+
     crate::serial_println!("Interrupts enabled. Waiting for keyboard input...");
     loop {
         // Pop events off the queue and print them!
@@ -455,6 +483,14 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
 
 
     // loop{}
+}
+
+// A simple function for our new task to execute
+extern "C" fn example_task() {
+    crate::serial_println!("HELLO FROM TASK B! The context switch was successful!");
+    loop {
+        x86_64::instructions::hlt();
+    }
 }
 
 // fn stack_overflow() {
