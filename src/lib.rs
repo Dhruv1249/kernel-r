@@ -32,6 +32,7 @@ mod qemu;
 mod serial;
 mod vga_buffer;
 mod io_apic;
+mod buddy;
 mod apic;
 mod boot_info;
 mod queue;
@@ -444,23 +445,24 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
         stack: alloc::vec::Vec::new(), // Empty, we are using the boot stack
     };
 
-    // 2. Create the real Task B, pointing to our example function
-    let task_b = crate::process::Task::new(example_task as u64);
+    crate::buddy::test_buddy_allocator();
+    //  Create the real Task B, pointing to our example function
+    // let task_b = crate::process::Task::new(example_task as u64);
 
-    crate::serial_println!("Initiating Context Switch...");
+    // crate::serial_println!("Initiating Context Switch...");
 
-    // 3. Pull the trigger!
-    unsafe {
-        crate::process::switch_task(
-            &mut task_a.context,
-            &mut task_a.stack_pointer,
-            &task_b.context,
-            task_b.stack_pointer,
-        );
-    }
-
-    // If the switch works, the CPU jumps to Task B, and this line NEVER PRINTS.
-    crate::serial_println!("FATAL: If you see this, the context switch failed.");
+    // // Pull the trigger!
+    // unsafe {
+    //     crate::process::switch_task(
+    //         &mut task_a.context,
+    //         &mut task_a.stack_pointer,
+    //         &task_b.context,
+    //         task_b.stack_pointer,
+    //     );
+    // }
+    //
+    // // If the switch works, the CPU jumps to Task B, and this line NEVER PRINTS.
+    // crate::serial_println!("FATAL: If you see this, the context switch failed.");
 
     crate::serial_println!("Interrupts enabled. Waiting for keyboard input...");
     loop {
@@ -484,14 +486,13 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
 
     // loop{}
 }
-
 // A simple function for our new task to execute
-extern "C" fn example_task() {
-    crate::serial_println!("HELLO FROM TASK B! The context switch was successful!");
-    loop {
-        x86_64::instructions::hlt();
-    }
-}
+// extern "C" fn example_task() {
+//     crate::serial_println!("HELLO FROM TASK B! The context switch was successful!");
+//     loop {
+//         x86_64::instructions::hlt();
+//     }
+// }
 
 // fn stack_overflow() {
 //     stack_overflow();
