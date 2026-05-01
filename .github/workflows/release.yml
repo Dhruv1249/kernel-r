@@ -42,8 +42,7 @@ jobs:
       - name: Create GitHub release and upload artifacts
         uses: ncipollo/release-action@v1
         with:
-          tag: ${{ github.ref_name }}
-          files: "kernel.iso,kernel.elf"
-          body_path: "ARCHITECTURE.md"
+          artifacts: "kernel.iso,kernel.elf"
+          bodyFile: "ARCHITECTURE.md"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
