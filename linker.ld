@@ -49,4 +49,8 @@ SECTIONS {
     /* Align to 4Kb so the our allocator starts with a clean page */
     . = ALIGN(4K);
     kernel_end = .; /* Mark the end of the kernel */
+    /DISCARD/ : {
+    *(.eh_frame)
+    *(.eh_frame_hdr)
+    }
 }
