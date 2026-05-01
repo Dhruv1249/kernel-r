@@ -28,6 +28,7 @@ extern crate alloc;
 mod gdt;
 mod interrupt;
 mod keyboard;
+mod slab;
 mod qemu;
 mod serial;
 mod vga_buffer;
