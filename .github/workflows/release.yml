@@ -28,6 +28,8 @@ jobs:
 
       - name: Setup Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
         
 
       - name: Build artifacts
