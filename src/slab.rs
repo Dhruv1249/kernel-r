@@ -30,13 +30,11 @@ impl SlabAllocator {
         None
     }
 
-    pub fn alloc(&mut self, buddy: &mut crate::buddy::BuddyAllocator, size: usize) -> *mut u8 {
+    pub fn alloc(&mut self, size: usize) -> Option<*mut u8> {
         match Self::list_index(size) {
             None => {
                 // FALLBACK: Size is too big for the slab.
-                let order = crate::buddy::size_to_order(size);
-                let block = buddy.alloc(order).expect("OOM: Buddy out of memory!");
-                return block as *mut u8;
+                return None;
             }
             Some(index) => {
                 let head = self.list_heads[index];
@@ -44,37 +42,58 @@ impl SlabAllocator {
                 if !head.is_null() {
                     // FAST PATH: We have a free block!
                     self.list_heads[index] = unsafe { (*head).next };
-                    return head as *mut u8;
+                    return Some(head as *mut u8);
                 } else {
-                    // CACHE MISS: The list is empty. Time to carve a new page.
-                    let page_ptr = buddy.alloc(0).expect("OOM: Buddy out of memory!") as *mut u8;
-                    let block_size = BLOCK_SIZES[index];
-                    let num_blocks = 4096 / block_size;
+                    // CACHE MISS
+                    return None;
+                }
+            }
+        }
+    }
 
-                    // Loop through and link: block 0 -> block 1 -> block 2...
-                    let mut current_ptr = page_ptr;
-                    
-                    for _ in 0..(num_blocks - 1) {
-                        let next_ptr = unsafe { current_ptr.add(block_size) };
-                        let node = current_ptr as *mut ListNode;
-                        
-                        unsafe {
-                            (*node).next = next_ptr as *mut ListNode;
-                        }
-                        
-                        current_ptr = next_ptr;
-                    }
+    pub unsafe fn populate_cache(&mut self, index: usize, page_ptr: *mut u8) {
+        let block_size = BLOCK_SIZES[index];
+        let num_blocks = 4096 / block_size;
 
-                    // The last block must point to null to terminate the list!
-                    unsafe {
-                        (*(current_ptr as *mut ListNode)).next = core::ptr::null_mut();
-                    }
+        // Loop through and link: block 0 -> block 1 -> block 2...
+        let mut current_ptr = page_ptr;
 
-                    // We return the very first block (page_ptr) to the user.
-                    // The rest of the list (starting at block 1) becomes our new free list!
-                    self.list_heads[index] = unsafe { page_ptr.add(block_size) as *mut ListNode };
-                    
-                    return page_ptr;
+        for _ in 0..(num_blocks - 1) {
+            let next_ptr = unsafe { current_ptr.add(block_size) };
+            let node = current_ptr as *mut ListNode;
+
+            unsafe {
+                (*node).next = next_ptr as *mut ListNode;
+            }
+
+            current_ptr = next_ptr;
+        }
+
+        // The last block must point to null to terminate the list!
+        unsafe {
+            (*(current_ptr as *mut ListNode)).next = core::ptr::null_mut();
+        }
+
+        // We return the very first block (page_ptr) to the user.
+        // The rest of the list (starting at block 1) becomes our new free list!
+        self.list_heads[index] = unsafe { page_ptr.add(block_size) as *mut ListNode };
+    }
+
+    pub fn free(&mut self, ptr: *mut u8, size: usize) {
+        match Self::list_index(size) {
+            None => {
+                // This is a safety net. The HeapAllocator should have caught this!
+                panic!(
+                    "FATAL: SlabAllocator asked to free oversized block ({} bytes)",
+                    size
+                );
+            }
+            Some(index) => {
+                let head = self.list_heads[index];
+                let current_ptr = ptr as *mut ListNode;
+                unsafe {
+                    (*current_ptr).next = head;
+                    self.list_heads[index] = current_ptr;
                 }
             }
         }

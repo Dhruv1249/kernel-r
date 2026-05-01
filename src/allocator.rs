@@ -1,7 +1,5 @@
 // src/allocator.rs
 
-use core::usize;
-
 pub struct ListNode {
     size: usize,
     next: Option<&'static mut ListNode>,
