@@ -27,6 +27,9 @@ fi
 
 set -e
 
+# Make sure we have target directory
+mkdir -p target
+
 # Assemble the boot stub
 nasm -f elf64 src/boot.asm -o target/boot.o
 
