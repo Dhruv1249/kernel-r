@@ -37,6 +37,7 @@ jobs:
           chmod +x ./build.sh
           ./build.sh
           cp target/kernel.elf kernel.elf
+          ls -lh kernel.iso kernel.elf  # will fail loudly if files are missing
 
       - name: Create GitHub release and upload artifacts
         uses: ncipollo/release-action@v1
