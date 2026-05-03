@@ -24,7 +24,8 @@ header_start:
 
 header_end:
 
-section .boot.text
+	section .boot.text
+
 start:
 
 	;   Magic number put in eax by grub by default
@@ -101,45 +102,52 @@ hlt
 
 no_multiboot:
 	call clear_screen
-	mov esi, no_multiboot_str
-  mov edi, 0xb8000
-  mov ah, 0x0f
-  call print_loop
-	hlt  ; Something went wrong, halt the system
+	mov  esi, no_multiboot_str
+	mov  edi, 0xb8000
+	mov  ah, 0x0f
+	call print_loop
+
+.halt:
+	;   Something went wrong, halt the system
+	jmp .halt; If CPU wakes up from HLT, send it back to the halt instruction
 
 no_long_mode:
 	call clear_screen
-	mov esi, long_mode_not_supported_str
-  mov edi, 0xb8000
-  mov ah, 0x0f
-  call print_loop
+	mov  esi, long_mode_not_supported_str
+	mov  edi, 0xb8000
+	mov  ah, 0x0f
+	call print_loop
 
-	hlt  ; Something went wrong, halt the system
+.halt:
+	jmp .halt; If CPU wakes up from HLT, send it back to the halt instruction
 
 no_cpuid:
 	call clear_screen
-	mov esi, cpu_not_supported_str
-  mov edi, 0xb8000
-  mov ah, 0x0f
-  call print_loop
-	hlt  ; Something went wrong, halt the system
+	mov  esi, cpu_not_supported_str
+	mov  edi, 0xb8000
+	mov  ah, 0x0f
+	call print_loop
+
+.halt:
+	;   Something went wrong, halt the system
+	jmp .halt; If CPU wakes up from HLT, send it back to the halt instruction
 
 clear_screen:
 	mov edi, 0xb8000
 	mov ecx, 1000; We are writing 1000 32-bit chunks (4000 bytes total)
 	mov eax, 0x0f200f20; 0x20 is the space character, 0x0f is white-on-black. This puts two blank characters into eax.
-  cld
+	cld
 	rep stosd; Fill the screen
 	ret
 
 print_loop:
-  lodsb
-  cmp al, 0
-  je .done
-  mov [edi], al
-  mov [edi + 1], ah
-  add edi, 2
-  jmp print_loop
+	lodsb
+	cmp al, 0
+	je  .done
+	mov [edi], al
+	mov [edi + 1], ah
+	add edi, 2
+	jmp print_loop
 
 .done:
 	ret
@@ -152,17 +160,16 @@ set_up_page_tables:
 	;   Or to set last 2 bits to 1
 	or  eax, 0b11
 	mov [p4_table], eax
-  
-  ;   Map higher half of kernel
-  mov eax, p3_table
-  ;   Map the Higher Half (P4 Index 256 -> P3 Table)
-  ;   By doing this, 0xFFFF_8000_0000_0000 now resolves to the exact 
-  ;   same physical memory as 0x0!
-  or  eax, 0b11
-  ;   Each entry in the P4 table is 8 bytes long, so we need to offset
-  ;   Index 256 * 8 = 2048
-  mov [p4_table + 256 * 8], eax
 
+	;   Map higher half of kernel
+	mov eax, p3_table
+	;   Map the Higher Half (P4 Index 256 -> P3 Table)
+	;   By doing this, 0xFFFF_8000_0000_0000 now resolves to the exact
+	;   same physical memory as 0x0!
+	or  eax, 0b11
+	;   Each entry in the P4 table is 8 bytes long, so we need to offset
+	;   Index 256 * 8 = 2048
+	mov [p4_table + 256 * 8], eax
 
 	mov eax, p2_table
 	or  eax, 0b11
@@ -182,10 +189,10 @@ set_up_page_tables:
 	cmp  ecx, 512
 	jne  .map_p1_table
 
-	;   Guard page
+	; Guard page
 	; mov eax, guard_page
 	; shr eax, 12; Divide by 4kb
-	;
+	
 	; mov dword [p1_table + eax * 8], 0; Clear lower 32 bits
 	; mov dword [p1_table + eax * 8 + 4], 0; Clear upper 32 bits
 
@@ -208,12 +215,12 @@ set_up_page_tables:
 	cmp  ecx, 512
 	jne  .map_p1_table_2
 	;    Guard page — unmap page just below stack_bottom (0x237000)
-	; mov  eax, stack_bottom
-	; sub  eax, 4096
-	; shr  eax, 12
-	; sub  eax, 512; subtract 512 because p1_table_2 starts at 0x200000
-	; mov  dword [p1_table_2 + eax * 8], 0
-	; mov  dword [p1_table_2 + eax * 8 + 4], 0
+	;    mov  eax, stack_bottom
+	;    sub  eax, 4096
+	;    shr  eax, 12
+	;    sub  eax, 512; subtract 512 because p1_table_2 starts at 0x200000
+	;    mov  dword [p1_table_2 + eax * 8], 0
+	;    mov  dword [p1_table_2 + eax * 8 + 4], 0
 	mov  ecx, 2
 
 .map_p2_table:
@@ -240,11 +247,11 @@ long_mode_start:
 
 	;   2. Point the CPU's Stack Pointer to our new stack
 	mov rax, stack_top
-  mov rsp, rax
+	mov rsp, rax
 
 	;   3. Now it is safe to jump into Rust!
-  mov rax, _start
-	jmp rax 
+	mov rax, _start
+	jmp rax
 
 section .boot.bss
 
@@ -268,9 +275,8 @@ p1_table:
 p1_table_2:
 	resb 4096
 
-
-section .bss
-  align 4096
+	section .bss
+	align   4096
 
 guard_page:
 	resb 4096
@@ -287,9 +293,9 @@ stack_top:
 	;       Some magic code for GDT (Global Descriptor Table)
 	section .boot.rodata
 
-  cpu_not_supported_str: db "CPUID not supported. Error code: C", 0 ; Here 0 is the null character
-  long_mode_not_supported_str: db "Long mode not supported. Error code: L", 0
-  no_multiboot_str: db "Multiboot error. Error code: M", 0
+	cpu_not_supported_str: db "CPUID not supported. Error code: C", 0 ; Here 0 is the null character
+	long_mode_not_supported_str: db "Long mode not supported. Error code: L", 0
+	no_multiboot_str: db "Multiboot error. Error code: M", 0
 
 gdt64:
 	dq 0; Entry 0: The Null Descriptor (CPU mandates the first entry be completely zero)

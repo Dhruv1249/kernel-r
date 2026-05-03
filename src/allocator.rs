@@ -4,15 +4,55 @@ pub struct Locked<A> {
     inner: spin::Mutex<A>,
 }
 
+pub struct InterruptSafeGuard<'a, A> {
+    // Wrapped in Option so we can manually drop the lock first
+    inner: Option<spin::MutexGuard<'a, A>>,
+    interrupts_were_enabled: bool,
+}
+
 impl<A> Locked<A> {
     pub const fn new(inner: A) -> Self {
         Locked {
             inner: spin::Mutex::new(inner),
         }
     }
-    // Fixed the lifetime warning here
-    pub fn lock(&self) -> spin::MutexGuard<'_, A> {
-        self.inner.lock()
+    pub fn lock(&self) -> InterruptSafeGuard<'_, A> {
+        let saved_state = x86_64::instructions::interrupts::are_enabled();
+        
+        if saved_state {
+            x86_64::instructions::interrupts::disable();
+        }
+
+        InterruptSafeGuard {
+            inner: Some(self.inner.lock()),
+            interrupts_were_enabled: saved_state,
+        }
+    }
+}
+
+// Implement Deref so we can use the guard transparently
+impl<'a, A> core::ops::Deref for InterruptSafeGuard<'a, A> {
+    type Target = A;
+    fn deref(&self) -> &A {
+        self.inner.as_ref().expect("Guard used after drop")
+    }
+}
+
+impl<'a, A> core::ops::DerefMut for InterruptSafeGuard<'a, A> {
+    fn deref_mut(&mut self) -> &mut A {
+        self.inner.as_mut().expect("Guard used after drop")
+    }
+}
+
+impl<'a, A> Drop for InterruptSafeGuard<'a, A> {
+    fn drop(&mut self) {
+        //  Explicitly drop the spinlock FIRST
+        self.inner.take();
+
+        // NOW it is safe to restore the hardware interrupt state
+        if self.interrupts_were_enabled {
+            x86_64::instructions::interrupts::enable();
+        }
     }
 }
 
@@ -25,7 +65,7 @@ pub struct HeapAllocator {
 impl HeapAllocator {
     pub const fn new() -> Self {
         HeapAllocator {
-            slab:crate::slab::SlabAllocator::new(),
+            slab: crate::slab::SlabAllocator::new(),
             virtual_bump_ptr: 0,
             heap_end: 0,
         }
@@ -48,13 +88,17 @@ impl HeapAllocator {
     }
 }
 
+pub fn align_to(addr: usize, align: usize) -> usize {
+    (addr + align - 1) & !(align - 1)
+}
+
 #[global_allocator]
 pub static ALLOCATOR: Locked<HeapAllocator> = Locked::new(HeapAllocator::new());
 
 unsafe impl core::alloc::GlobalAlloc for Locked<HeapAllocator> {
     unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
         let mut heap = self.lock();
-        let size = layout.size();
+        let size = align_to(layout.size(), layout.align());
 
         // FAST PATH & CACHE MISS: Handled by the Slab Allocator
         if let Some(index) = crate::slab::SlabAllocator::list_index(size) {
@@ -88,7 +132,7 @@ unsafe impl core::alloc::GlobalAlloc for Locked<HeapAllocator> {
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: core::alloc::Layout) {
         let mut heap = self.lock();
-        let size = layout.size();
+        let size = align_to(layout.size(), layout.align());
 
         if crate::slab::SlabAllocator::list_index(size).is_some() {
             // Traffic Cop: Send small blocks to the Slab
@@ -96,8 +140,10 @@ unsafe impl core::alloc::GlobalAlloc for Locked<HeapAllocator> {
         } else {
             // Traffic Cop: Bypass Slab, send massive blocks directly to Buddy
             let order = crate::buddy::size_to_order(size);
-            
-            crate::memory::FRAME_ALLOCATOR.lock().free(ptr as usize, order);
+
+            crate::memory::FRAME_ALLOCATOR
+                .lock()
+                .free(ptr as usize, order);
         }
     }
 }

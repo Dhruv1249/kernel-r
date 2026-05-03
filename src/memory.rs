@@ -1,7 +1,8 @@
 // src/memory.rs
 
 // Start as an empty allocator, initialized fully at boot
-pub static FRAME_ALLOCATOR: crate::allocator::Locked<crate::buddy::BuddyAllocator> = crate::allocator::Locked::new(crate::buddy::BuddyAllocator::empty());
+pub static FRAME_ALLOCATOR: crate::allocator::Locked<crate::buddy::BuddyAllocator> =
+    crate::allocator::Locked::new(crate::buddy::BuddyAllocator::empty());
 
 pub const HEAP_START: usize = 0x_4444_4444_0000;
 pub const HEAP_SIZE: usize = 0xA00000; // 10 MB
@@ -20,28 +21,45 @@ pub static mut RESERVED_REGIONS: [ReservedRegion; MAX_RESERVED] = [ReservedRegio
     name: "",
 }; MAX_RESERVED];
 pub static mut RESERVED_COUNT: usize = 0;
+use spin::Mutex;
 
-pub unsafe fn reserve_region(start: usize, end: usize, name: &'static str) {
-    unsafe {
-        if RESERVED_COUNT < MAX_RESERVED {
-            RESERVED_REGIONS[RESERVED_COUNT] = ReservedRegion { start, end, name };
-            RESERVED_COUNT += 1;
-            crate::serial_println!("Reserved: {} [{:#x} - {:#x}]", name, start, end);
-        } else {
-            panic!("Out of reserved region slots!");
-        }
+// Bundle the state together
+pub struct RegionTracker {
+    regions: [ReservedRegion; MAX_RESERVED],
+    count: usize,
+}
+
+// Safely wrapped in a Spinlock
+pub static RESERVED_TRACKER: Mutex<RegionTracker> = Mutex::new(RegionTracker {
+    regions: [ReservedRegion {
+        start: 0,
+        end: 0,
+        name: "",
+    }; MAX_RESERVED],
+    count: 0,
+});
+
+pub fn reserve_region(start: usize, end: usize, name: &'static str) {
+    let mut tracker = RESERVED_TRACKER.lock();
+    if tracker.count < MAX_RESERVED {
+        let count = tracker.count;
+        tracker.regions[count] = ReservedRegion { start, end, name };
+        tracker.count += 1;
+        crate::serial_println!("Reserved: {} [{:#x} - {:#x}]", name, start, end);
+    } else {
+        panic!("Out of reserved region slots!");
     }
 }
 
 pub fn is_reserved(phys_addr: usize, size: usize) -> bool {
     let end_addr = phys_addr + size;
-    unsafe {
-        for i in 0..RESERVED_COUNT {
-            let region = &RESERVED_REGIONS[i];
-            // Check for overlap
-            if phys_addr < region.end && end_addr > region.start {
-                return true;
-            }
+    let tracker = RESERVED_TRACKER.lock();
+
+    for i in 0..tracker.count {
+        let region = &tracker.regions[i];
+        // Check for overlap
+        if phys_addr < region.end && end_addr > region.start {
+            return true;
         }
     }
     false
@@ -54,7 +72,10 @@ pub struct BumpAllocator {
 }
 
 impl BumpAllocator {
-    pub fn init(kernel_end: usize, memory_map: &'static [crate::boot_info::MemoryMapEntry]) -> Self {
+    pub fn init(
+        kernel_end: usize,
+        memory_map: &'static [crate::boot_info::MemoryMapEntry],
+    ) -> Self {
         let aligned_addr = (kernel_end + 4095) & !(4096 - 1);
         BumpAllocator {
             next_free_frame: aligned_addr,
@@ -122,7 +143,10 @@ pub fn allocate_zeroed_frame() -> Option<usize> {
 }
 
 // THE GRAND BOOTSTRAPPER
-pub fn init_physical_memory(memory_map: &'static [crate::boot_info::MemoryMapEntry], bump_alloc: &mut BumpAllocator) {
+pub fn init_physical_memory(
+    memory_map: &'static [crate::boot_info::MemoryMapEntry],
+    bump_alloc: &mut BumpAllocator,
+) {
     crate::serial_println!("Initializing O(1) Buddy Allocator...");
 
     let mut highest_addr = 0;

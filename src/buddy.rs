@@ -133,8 +133,6 @@ impl BuddyAllocator {
                     // Push the block into the current order's free list
                     self.push_block(curr_order, buddy_block);
                     
-                    // FIX: We just created a divergence in state. Toggle the bit to reflect 
-                    // that the right half is free and the left half is allocated/splitting.
                     self.toggle_bit(curr_order, buddy_addr);
                 }
 
@@ -159,6 +157,10 @@ impl BuddyAllocator {
         let byte_index = bit_index / 8;
         let bit_offset = bit_index % 8;
         let mask = 1 << bit_offset;
+
+        if byte_index >= self.bitmap_size {
+            panic!("FATAL: Buddy Allocator out of bounds write! Addr: {:#x}, Order: {}", addr, order);
+        }
         
         unsafe {
             let byte_ptr = self.bitmap.add(byte_index);

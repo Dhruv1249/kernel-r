@@ -150,15 +150,15 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
     let mbi_ptr = multiboot_info_addr as *const u32;
     let mbi = unsafe { &*mbi_ptr };
 
-    unsafe {
-        crate::memory::reserve_region(0x0, 0x1000, "IVT / BIOS Data");
-        crate::memory::reserve_region(0xA0000, 0x100000, "VGA / Legacy Area");
+   
+    crate::memory::reserve_region(0x0, 0x1000, "IVT / BIOS Data");
+    crate::memory::reserve_region(0xA0000, 0x100000, "VGA / Legacy Area");
         
-        crate::memory::reserve_region(0x100000, k_end, "Kernel Image + Boot Section");
+    crate::memory::reserve_region(0x100000, k_end, "Kernel Image + Boot Section");
         
-        crate::memory::reserve_region(multiboot_info_addr, multiboot_info_addr + (*mbi as usize), "Multiboot Info");
-        crate::memory::reserve_region(st_bottom - 4096, st_top, "Kernel Stack + Guard Page");
-    }
+    crate::memory::reserve_region(multiboot_info_addr, multiboot_info_addr + (*mbi as usize), "Multiboot Info");
+    crate::memory::reserve_region(st_bottom - 4096, st_top, "Kernel Stack + Guard Page");
+    
     serial_println!("Multiboot size: {:?}", mbi);
 
     let tag_iter = boot_info::TagIterator::new(multiboot_info_addr);
