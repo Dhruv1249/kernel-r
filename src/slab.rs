@@ -12,7 +12,7 @@ pub struct SlabAllocator {
 }
 
 impl SlabAllocator {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         SlabAllocator {
             list_heads: [core::ptr::null_mut(); BLOCK_SIZES.len()],
         }

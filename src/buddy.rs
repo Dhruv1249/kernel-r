@@ -45,13 +45,29 @@ pub fn calculate_bitmap_size(highest_physical_address: usize) -> usize {
 }
 
 impl BuddyAllocator {
+
+    pub unsafe fn init(&mut self, bitmap_ptr: *mut u8, bitmap_size: usize, base_addr: usize) {
+        self.bitmap = bitmap_ptr;
+        self.bitmap_size = bitmap_size;
+        self.base_addr = base_addr;
+        self.free_list = [core::ptr::null_mut(); MAX_ORDER];
+    }
+
     pub fn new(bitmap_ptr: *mut u8, bitmap_size: usize, base_addr: usize) -> Self {
-        // let mut free_list = [FreeBlock::empty(),MAX_ORDER];
         BuddyAllocator {
             free_list: [core::ptr::null_mut(); MAX_ORDER],
             bitmap: bitmap_ptr,
             bitmap_size,
             base_addr
+        }
+    }
+
+    pub const fn empty() -> Self {
+        BuddyAllocator {
+            free_list: [core::ptr::null_mut(); MAX_ORDER],
+            bitmap: core::ptr::null_mut(),
+            bitmap_size: 0,
+            base_addr: 0,
         }
     }
 
@@ -84,7 +100,7 @@ impl BuddyAllocator {
 
     pub fn alloc(&mut self, order: usize) -> Option<*mut FreeBlock> {
         // Clamp the order to the maximum order
-        let order = core::cmp::min(order, MAX_ORDER);
+        let order = core::cmp::min(order, MAX_ORDER - 1);
         let block = self.free_list[order];
 
         if block != core::ptr::null_mut() {
@@ -93,6 +109,7 @@ impl BuddyAllocator {
             self.toggle_bit(order, block as usize);
             return Some(block);
         }
+        
         // No free blocks of the requested order found, try higher orders
         for ord in order + 1..MAX_ORDER {
             let block = self.free_list[ord];
@@ -101,17 +118,24 @@ impl BuddyAllocator {
                 // Pop the block from the free list
                 self.remove_block(ord, block);
                 self.toggle_bit(ord, block as usize);
+                
                 // Split the block into lower order blocks
                 let mut curr_order = ord;
                 while curr_order > order {
                     // Decrement the order by 1 and split the block in half
                     curr_order -= 1;
                     let half_block_size = 1 << (12 + curr_order);
+                    
                     // Cast the block to a FreeBlock pointer
                     let buddy_addr = block as *mut FreeBlock as usize + half_block_size;
                     let buddy_block = buddy_addr as *mut FreeBlock;
+                    
                     // Push the block into the current order's free list
                     self.push_block(curr_order, buddy_block);
+                    
+                    // FIX: We just created a divergence in state. Toggle the bit to reflect 
+                    // that the right half is free and the left half is allocated/splitting.
+                    self.toggle_bit(curr_order, buddy_addr);
                 }
 
                 return Some(block);
@@ -120,34 +144,49 @@ impl BuddyAllocator {
         None
     }
 
+    pub fn toggle_bit(&mut self, order: usize, addr: usize) -> bool {
+        let phys_addr = addr.saturating_sub(self.base_addr); 
+        let mut bit_index = phys_addr >> (12 + order + 1);
+        
+        // Geometric series offset. 
+        // Order 0 gets half the bitmap, Order 1 gets a quarter, etc.
+        let mut offset = 0;
+        for i in 0..order {
+            offset += (self.bitmap_size * 8) >> (i + 1);
+        }
+        bit_index += offset;
+        
+        let byte_index = bit_index / 8;
+        let bit_offset = bit_index % 8;
+        let mask = 1 << bit_offset;
+        
+        unsafe {
+            let byte_ptr = self.bitmap.add(byte_index);
+            *byte_ptr ^= mask;
+            (*byte_ptr & mask) == 0
+        }
+    }
+
     pub fn free(&mut self, mut addr: usize, mut order: usize) {
-        // Clamp order just in case
-        order = core::cmp::min(order, MAX_ORDER);
+        order = core::cmp::min(order, MAX_ORDER - 1);
 
         while order < MAX_ORDER - 1 {
-            // Toggle the bit. If it returns true, our buddy is also free!
             let buddy_is_free = self.toggle_bit(order, addr);
 
             if buddy_is_free {
-                //  Calculate the buddy's address
+                // Buddy is free! Merge them.
                 let size = 1 << (12 + order);
                 let buddy_addr = addr ^ size;
-
-                //  Rip the buddy out of the free list
                 self.remove_block(order, buddy_addr as *mut FreeBlock);
-
-                //  Merge them (address becomes the Left Buddy)
                 addr = addr & !size;
                 order += 1;
             } else {
                 // Buddy is allocated. We are done merging.
-                // Push this block to the list and stop.
                 self.push_block(order, addr as *mut FreeBlock);
-                self.toggle_bit(order, addr);
                 return;
             }
         }
-        // At MAX_ORDER, we just push it. No buddy exists at Order 11.
+        // At MAX_ORDER, we just push it.
         self.push_block(order, addr as *mut FreeBlock);
     }
 
@@ -177,87 +216,7 @@ impl BuddyAllocator {
             }
         }
     }
-
-   pub fn toggle_bit(&mut self, order: usize, addr: usize) -> bool {
-        // Convert the virtual memory pointer back into a 0-based physical offset
-        let phys_addr = addr.saturating_sub(self.base_addr); 
-        
-        let mut bit_index = phys_addr >> (12 + order + 1);
-        
-        // Add offset so they won't overlap
-        bit_index += order * ((self.bitmap_size / 11) * 8);
-        
-        let byte_index = bit_index / 8;
-        let bit_offset = bit_index % 8;
-        let mask = 1 << bit_offset;
-        
-        unsafe {
-            let byte_ptr = self.bitmap.add(byte_index);
-            *byte_ptr ^= mask;
-            (*byte_ptr & mask) == 0
-        }
-    }
 }
 
-#[repr(align(65536))]
-struct AlignedMemory([u8; 65536]);
-
-static mut FAKE_MEMORY: AlignedMemory = AlignedMemory([0; 65536]);
-// Add a fake bitmap array for testing
-static mut FAKE_BITMAP: AlignedMemory = AlignedMemory([0; 65536]);
-
-pub fn test_buddy_allocator() {
-    crate::serial_println!("--- Starting O(1) Buddy Allocator Tests ---");
-
-    let start_addr = unsafe { core::ptr::addr_of_mut!(FAKE_MEMORY.0) as usize };
-    let end_addr = start_addr + 65536; 
-
-    let bitmap_ptr = unsafe { core::ptr::addr_of_mut!(FAKE_BITMAP.0) as *mut u8 };
-    
-    // Pass start_addr as our physical base!
-    let mut allocator = BuddyAllocator::new(bitmap_ptr, 65536, start_addr);
-
-    allocator.add_free_region(start_addr, end_addr);
-
-    // ==========================================
-    // TEST 1: Exhaustion & OOM
-    // ==========================================
-    crate::serial_println!("[Test 1] Memory Exhaustion");
-    let mut blocks = [0usize; 16];
-    for i in 0..16 {
-        blocks[i] = allocator.alloc(0).expect("Failed to allocate") as *mut FreeBlock as usize;
-    }
-    crate::serial_println!("   PASS: Allocated all 16 pages.");
-
-    if allocator.alloc(0).is_none() {
-        crate::serial_println!("   PASS: 17th allocation correctly returned None.");
-    } else {
-        panic!("   FAIL: Allocator invented memory!");
-    }
-
-    // ==========================================
-    // TEST 2: Out-of-Order Freeing
-    // ==========================================
-    crate::serial_println!("[Test 2] Out-of-Order Freeing & Deferred Merging");
-    allocator.free(blocks[0], 0); 
-    allocator.free(blocks[2], 0); 
-    allocator.free(blocks[3], 0); 
-    allocator.free(blocks[1], 0); 
-
-    match allocator.alloc(2) {
-        Some(ptr) => crate::serial_println!("   PASS: Deferred merge successful. Allocated 16KB block at {:#x}", ptr as *mut FreeBlock as usize),
-        None => panic!("   FAIL: Allocator failed to merge out-of-order blocks!"),
-    }
-
-    // ==========================================
-    // TEST 3: Impossible Demands
-    // ==========================================
-    crate::serial_println!("[Test 3] Impossible Allocation Requests");
-    if allocator.alloc(10).is_none() {
-        crate::serial_println!("   PASS: Massive allocation correctly rejected.");
-    } else {
-        panic!("   FAIL: Allocator gave us memory it doesn't have.");
-    }
-
-    crate::serial_println!("--- All O(1) Edge Cases Passed! ---");
-}
+unsafe impl Send for BuddyAllocator {}
+unsafe impl Sync for BuddyAllocator {}

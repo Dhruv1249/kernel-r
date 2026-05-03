@@ -172,9 +172,6 @@ pub fn unmap(page: Page, p4_table: &mut PageTable) -> Option<PhysFrame> {
     // Flush the CPU cache for this virtual address
     x86_64::instructions::tlb::flush(page.start_address());
 
-    // Clear the frame in the physical bitmap allocator
-    crate::memory::clear_frame(phys_addr.as_u64() as usize);
-
     Some(x86_64::structures::paging::PhysFrame::containing_address(
         phys_addr,
     ))

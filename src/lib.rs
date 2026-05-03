@@ -5,6 +5,7 @@
 // We won't be able to use the standard library in this case.
 // That's why disabling it here.
 #![no_std]
+#![allow(dead_code)]
 // Also just learned #! -> for whole crate and only # -> for module directly below it!
 #![feature(abi_x86_interrupt)] 
 // We think rust starts with main, but in reality its entry point is a _start functions which
@@ -95,11 +96,6 @@ pub unsafe fn validate_checksum(start_ptr: *const u8, length: usize) -> bool {
 
 
 
-// Defining our global heap
-#[global_allocator]
-static HEAP_ALLOCATOR: crate::allocator::Locked<crate::allocator::LinkedListAllocator> = 
-    crate::allocator::Locked::new(crate::allocator::LinkedListAllocator::new());
-
 
 unsafe extern "C" {
     static stack_bottom: u8;
@@ -152,8 +148,17 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
 
 
     let mbi_ptr = multiboot_info_addr as *const u32;
-
     let mbi = unsafe { &*mbi_ptr };
+
+    unsafe {
+        crate::memory::reserve_region(0x0, 0x1000, "IVT / BIOS Data");
+        crate::memory::reserve_region(0xA0000, 0x100000, "VGA / Legacy Area");
+        
+        crate::memory::reserve_region(0x100000, k_end, "Kernel Image + Boot Section");
+        
+        crate::memory::reserve_region(multiboot_info_addr, multiboot_info_addr + (*mbi as usize), "Multiboot Info");
+        crate::memory::reserve_region(st_bottom - 4096, st_top, "Kernel Stack + Guard Page");
+    }
     serial_println!("Multiboot size: {:?}", mbi);
 
     let tag_iter = boot_info::TagIterator::new(multiboot_info_addr);
@@ -176,19 +181,10 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
                 core::slice::from_raw_parts(first_entry_ptr, num_entries as usize)
             };
 
-            let mut allocator = crate::memory::BumpAllocator::init(
-                k_end, 
-                entries, 
-                multiboot_info_addr, 
-                multiboot_info_addr+ (*mbi as usize), 
-                st_bottom, 
-                st_top 
-                );
+            let mut allocator = crate::memory::BumpAllocator::init(k_end, entries);
 
-
-            let bitmap_allocator = crate::memory::BitmapAllocator::init(entries, &mut allocator);
-            // Move the allocator to the global lock
-            *crate::memory::ALLOCATOR.lock() = Some(bitmap_allocator);
+            // Bootstrap the Buddy Allocator!
+            crate::memory::init_physical_memory(entries, &mut allocator);
 
             serial_print!("Allocating frame1: {:#x?}\n", crate::memory::allocate_frame()); 
             serial_print!("Allocating frame2: {:#x?}\n", crate::memory::allocate_frame()); 
@@ -299,6 +295,11 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
         while current_offset < total_table_length {
             let record_virt_addr = x86_64::VirtAddr::new(madt_virt.as_u64() + current_offset);
             let record_header = unsafe { &*(record_virt_addr.as_ptr::<boot_info::MadtRecordHeader>()) };
+
+            if record_header.record_length < 2 {
+                crate::serial_println!("Reached zero-padded region of MADT. Breaking loop.");
+                break;
+            }
             
             if record_header.entry_type == 1 {
                 let io_apic_record = unsafe { &*(record_virt_addr.as_ptr::<boot_info::IoApicRecord>()) };
@@ -384,42 +385,72 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
 
     // Give pages to the heap
     unsafe {
-        crate::HEAP_ALLOCATOR.lock().init(crate::memory::HEAP_START, crate::memory::HEAP_SIZE);
+       crate::allocator::ALLOCATOR.lock().init(crate::memory::HEAP_START, crate::memory::HEAP_SIZE);
     }
 
     crate::serial_println!("Heap initialized");
 
-    // --- TESTING HEAP COALESCING ---
-    crate::serial_println!("--- Starting Heap Coalescing Test ---");
+    // --- COALESCING & FRAGMENTATION TEST ---
+    crate::serial_println!("========================================");
+    crate::serial_println!("      BUDDY COALESCING STRESS TEST      ");
+    crate::serial_println!("========================================");
+
     use alloc::vec::Vec;
 
-    // 1. Allocate 3 separate blocks (10,000 bytes each)
-    let vec1: Vec<u8> = Vec::with_capacity(10_000_00);
-    let vec2: Vec<u8> = Vec::with_capacity(10_000_00);
-    let vec3: Vec<u8> = Vec::with_capacity(10_000_00);
-    crate::serial_println!("Allocated 3 vectors (10KB each).");
+    let three_mb = 3 * 1024 * 1024;
+    let nine_mb = 9 * 1024 * 1024;
 
-    //  Fragment the heap by dropping them out of order
-    drop(vec2);
-    crate::serial_println!("Dropped middle vector (Created a hole).");
-    
-    drop(vec1);
-    crate::serial_println!("Dropped first vector (Triggered Merge Right!).");
-    
-    drop(vec3);
-    crate::serial_println!("Dropped third vector (Triggered Merge Left!).");
+    crate::serial_println!("Allocating three 3MB vectors...");
+    // 3MB requests Order 10 (4MB blocks). 3 of these will consume 12MB.
+    let mut v1: Vec<u8> = Vec::with_capacity(three_mb);
+    let mut v2: Vec<u8> = Vec::with_capacity(three_mb);
+    let mut v3: Vec<u8> = Vec::with_capacity(three_mb);
 
-    //  The Ultimate Test: Ask for lagre amount of bytes. 
-    // If coalescing failed, the heap is split into three 10K blocks, 
-    // and this will instantly trigger an Out-Of-Memory panic!
-    let huge_vec: Vec<u8> = Vec::with_capacity(1024*10);
-    crate::serial_println!("SUCCESS! Allocated huge vector of capacity: {}", huge_vec.capacity());
-    crate::serial_println!("--- Heap Coalescing Works! ---");
+    unsafe {
+        core::ptr::write_bytes(v1.as_mut_ptr(), 0x11, three_mb);
+        core::ptr::write_bytes(v2.as_mut_ptr(), 0x22, three_mb);
+        core::ptr::write_bytes(v3.as_mut_ptr(), 0x33, three_mb);
+    }
+    unsafe {
+        v1.set_len(three_mb);
+        v2.set_len(three_mb);
+        v3.set_len(three_mb);
+    }
+
+    crate::serial_println!("v1 allocated at: {:p}", v1.as_ptr());
+    crate::serial_println!("v2 allocated at: {:p}", v2.as_ptr());
+    crate::serial_println!("v3 allocated at: {:p}", v3.as_ptr());
+
+    crate::serial_println!("Deallocating out of sequence (v2, v1, v3)...");
+    
+    // Dropping v2 leaves a massive 4MB physical hole between v1 and v3.
+    drop(v2); 
+    // Dropping v1 checks if it can merge rightward into v2's hole.
+    drop(v1); 
+    // Dropping v3 triggers a chain reaction, merging v1+v2+v3 back into a monolithic block.
+    drop(v3); 
+
+    crate::serial_println!("All 3MB vectors dropped. Memory should be fully coalesced.");
+    crate::serial_println!("Attempting monolithic 9MB allocation...");
+
+    let mut v_massive: Vec<u8> = Vec::with_capacity(nine_mb);
+    unsafe {
+        core::ptr::write_bytes(v_massive.as_mut_ptr(), 0x99, nine_mb);
+        v_massive.set_len(nine_mb);
+    }
+
+    crate::serial_println!("SUCCESS! 9MB vector allocated at: {:p}", v_massive.as_ptr());
+    crate::serial_println!("Verified massive vector memory retention: {:#X}", v_massive[nine_mb - 1]);
+
+    crate::serial_println!("========================================");
+    crate::serial_println!("          COALESCING TEST PASSED        ");
+    crate::serial_println!("========================================");
+
+    
 
     // crate::vga_buffer::WRITER.lock().clear();
 
-    use alloc::string::String;
-    let mut test_string = String::new();
+    let mut test_string = alloc::string::String::new();
     test_string.push_str("Hello world");
     println!("Test string: {:?}", test_string);
 
@@ -437,16 +468,15 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
 
     // NEW: Unmask the keyboard!
     unsafe { crate::io_apic::IO_APIC.lock().as_ref().unwrap().init_keyboard(); }
-    let mut task_a = crate::process::Task {
-        id: 0,
-        stack_pointer: 0,
-        context: crate::process::TaskContext::default(),
-        state: crate::process::TaskState::Running,
-        page_table: 0,
-        stack: alloc::vec::Vec::new(), // Empty, we are using the boot stack
-    };
-
-    crate::buddy::test_buddy_allocator();
+    // let mut task_a = crate::process::Task {
+    //     id: 0,
+    //     stack_pointer: 0,
+    //     context: crate::process::TaskContext::default(),
+    //     state: crate::process::TaskState::Running,
+    //     page_table: 0,
+    //     stack: alloc::vec::Vec::new(), // Empty, we are using the boot stack
+    // };
+    //
     //  Create the real Task B, pointing to our example function
     // let task_b = crate::process::Task::new(example_task as u64);
 
