@@ -5,13 +5,30 @@ use alloc::vec;
 #[derive(Debug, Default, Clone, Copy)]
 #[repr(C)] // CRITICAL: Must be C-representation so our Assembly can read it reliably
 pub struct TaskContext {
-    // We need to preserve these registers across task switches
-    pub rbx: u64,
-    pub rbp: u64,
-    pub r12: u64,
-    pub r13: u64,
-    pub r14: u64,
-    pub r15: u64,
+    // Order in which registers are pushed onto the stack
+    // r15 is pushed last while ss is pushed first
+    pub r15: u64, // Preserved
+    pub r14: u64, // Preserved
+    pub r13: u64, // Preserved
+    pub r12: u64, // Preserved
+    pub r11: u64, // Scratch
+    pub r10: u64, // Scratch
+    pub r9: u64,  // Scratch
+    pub r8: u64,  // Scratch
+    pub rdi: u64, // Scratch
+    pub rsi: u64, // Scratch
+    pub rbp: u64, // Preserved
+    pub rbx: u64, // Preserved
+    pub rdx: u64, // Scratch
+    pub rcx: u64, // Scratch
+    pub rax: u64, // Scratch
+    pub error_code: u64,
+    // Hardware Frames
+    pub rip: u64,
+    pub cs: u64,
+    pub rflags: u64,
+    pub rsp: u64,
+    pub ss: u64,
 }
 
 pub enum TaskState {
@@ -41,12 +58,20 @@ impl Task {
         let stack_end = stack_start + TASK_STACK_SIZE as u64;
 
         // Step back 16 bytes to make room to write a 64-bit return address
-        let initial_rsp = stack_end - 16;
+        let initial_rsp = stack_end - core::mem::size_of::<TaskContext>() as u64;
 
-        unsafe {
-            core::ptr::write((stack_end - 8) as *mut u64, 0);
-            core::ptr::write(initial_rsp as *mut u64, entry_point);
-        }
+        let context = TaskContext{
+            rip: entry_point,
+            cs: 0x8,
+            rflags: 0x202,
+            rsp: initial_rsp,
+            ss: 0x0,
+            ..Default::default()
+        };
+        
+        // Write context at the top of the TASK_STACK_SIZE
+        unsafe { core::ptr::write(initial_rsp as *mut TaskContext, context); }
+        
         Self {
             id: 0,
             stack_pointer: initial_rsp,
@@ -59,45 +84,69 @@ impl Task {
 }
 
 
-unsafe extern "C" {
-    pub fn switch_task(
-        old_context: *mut TaskContext, // rdi
-        old_sp: *mut u64,              // rsi
-        new_context: *const TaskContext, // rdx
-        new_sp: u64,                   // rcx
-    );
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_timer_handler(context: &mut crate::process::TaskContext) -> *mut TaskContext {
+    // 1. Tell the APIC we received the interrupt
+    crate::apic::LOCAL_APIC.lock().as_ref().unwrap().end_of_interrupt();
+    
+    crate::serial_println!("Timer tick! Context is at: {:p}", context);
+    return context;
 }
 
+// Global asm so rust knows how to call this function and doesn't mess with the stack
 core::arch::global_asm!(
-    ".global switch_task",
-    "switch_task:",
+    // ISR -> Interrupt Service Routine
+    ".global timer_isr",
+    "timer_isr:",
+    // Cpu just pushed ss, rsp, rflags, cs, rip
+    // Push error code
+    "push 0",
+    
+    // Push general purpose registers
+    "push rax",
+    "push rcx",
+    "push rdx",
+    "push rbx",
+    "push rbp",
+    "push rsi",
+    "push rdi",
+    "push r8",
+    "push r9",
+    "push r10",
+    "push r11",
+    "push r12",
+    "push r13",
+    "push r14",
+    "push r15",
 
-    // Save the old context
-    "mov [rdi + 0x0], rbx",
-    "mov [rdi + 0x8], rbp",
-    "mov [rdi + 0x10], r12",
-    "mov [rdi + 0x18], r13",
-    "mov [rdi + 0x20], r14",
-    "mov [rdi + 0x28], r15",
+    // Call our rust_timer_handler
+    "mov rdi, rsp",
+    "call rust_timer_handler",
+    // Move our context back to the stack
+    "mov rsp, rax",
 
-    // Save the old stack pointer
-    "mov [rsi], rsp",
+    // Restore the registers
+    "pop r15",
+    "pop r14",
+    "pop r13",
+    "pop r12",
+    "pop r11",
+    "pop r10",
+    "pop r9",
+    "pop r8",
+    "pop rdi",
+    "pop rsi",
+    "pop rbp",
+    "pop rbx",
+    "pop rdx",
+    "pop rcx",
+    "pop rax",
 
-    // Load the new stack pointer
-    "mov rsp, rcx",
+    // Pop the error code
+    "add rsp, 8",
 
-    // Load the new context
-    "mov rbx, [rdx + 0x0]",
-    "mov rbp, [rdx + 0x8]",
-    "mov r12, [rdx + 0x10]",
-    "mov r13, [rdx + 0x18]",
-    "mov r14, [rdx + 0x20]",
-    "mov r15, [rdx + 0x28]",
+    // Hardware return (tells CPU to pop the ss, rsp, rflags, cs, rip)
+    "iretq",
 
-    // Return
-    "ret",
 );
-
-
-
 

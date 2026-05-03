@@ -390,64 +390,6 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
 
     crate::serial_println!("Heap initialized");
 
-    // --- COALESCING & FRAGMENTATION TEST ---
-    crate::serial_println!("========================================");
-    crate::serial_println!("      BUDDY COALESCING STRESS TEST      ");
-    crate::serial_println!("========================================");
-
-    use alloc::vec::Vec;
-
-    let three_mb = 3 * 1024 * 1024;
-    let nine_mb = 9 * 1024 * 1024;
-
-    crate::serial_println!("Allocating three 3MB vectors...");
-    // 3MB requests Order 10 (4MB blocks). 3 of these will consume 12MB.
-    let mut v1: Vec<u8> = Vec::with_capacity(three_mb);
-    let mut v2: Vec<u8> = Vec::with_capacity(three_mb);
-    let mut v3: Vec<u8> = Vec::with_capacity(three_mb);
-
-    unsafe {
-        core::ptr::write_bytes(v1.as_mut_ptr(), 0x11, three_mb);
-        core::ptr::write_bytes(v2.as_mut_ptr(), 0x22, three_mb);
-        core::ptr::write_bytes(v3.as_mut_ptr(), 0x33, three_mb);
-    }
-    unsafe {
-        v1.set_len(three_mb);
-        v2.set_len(three_mb);
-        v3.set_len(three_mb);
-    }
-
-    crate::serial_println!("v1 allocated at: {:p}", v1.as_ptr());
-    crate::serial_println!("v2 allocated at: {:p}", v2.as_ptr());
-    crate::serial_println!("v3 allocated at: {:p}", v3.as_ptr());
-
-    crate::serial_println!("Deallocating out of sequence (v2, v1, v3)...");
-    
-    // Dropping v2 leaves a massive 4MB physical hole between v1 and v3.
-    drop(v2); 
-    // Dropping v1 checks if it can merge rightward into v2's hole.
-    drop(v1); 
-    // Dropping v3 triggers a chain reaction, merging v1+v2+v3 back into a monolithic block.
-    drop(v3); 
-
-    crate::serial_println!("All 3MB vectors dropped. Memory should be fully coalesced.");
-    crate::serial_println!("Attempting monolithic 9MB allocation...");
-
-    let mut v_massive: Vec<u8> = Vec::with_capacity(nine_mb);
-    unsafe {
-        core::ptr::write_bytes(v_massive.as_mut_ptr(), 0x99, nine_mb);
-        v_massive.set_len(nine_mb);
-    }
-
-    crate::serial_println!("SUCCESS! 9MB vector allocated at: {:p}", v_massive.as_ptr());
-    crate::serial_println!("Verified massive vector memory retention: {:#X}", v_massive[nine_mb - 1]);
-
-    crate::serial_println!("========================================");
-    crate::serial_println!("          COALESCING TEST PASSED        ");
-    crate::serial_println!("========================================");
-
-    
-
     // crate::vga_buffer::WRITER.lock().clear();
 
     let mut test_string = alloc::string::String::new();

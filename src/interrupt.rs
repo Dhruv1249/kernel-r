@@ -13,24 +13,29 @@ pub fn load_idt() {
         idt.breakpoint.set_handler_fn(breakpoint_handler);
         idt.page_fault.set_handler_fn(page_fault_handler);
         // Interrupt handler for managing the timer interrupt
-        idt[32].set_handler_fn(tick_handler);
+        unsafe {
+            idt[32].set_handler_addr(x86_64::VirtAddr::new(timer_isr as *const () as u64));
+        }
         idt[33].set_handler_fn(keyboard_handler);
-        // General Protection Fault (#GP - Vector 13): Catches memory protection 
+        // General Protection Fault (#GP - Vector 13): Catches memory protection
         // and privilege violations, such as accessing non-canonical addresses or
         // a user-space program trying to touch kernel memory.
-        idt.general_protection_fault.set_handler_fn(general_protection_failure_handler);
-        // Stack Segment Fault (#SS - Vector 12): Catches errors strictly related to the 
-        // stack, such as the stack pointer (rsp) becoming corrupted, misaligned, or 
+        idt.general_protection_fault
+            .set_handler_fn(general_protection_failure_handler);
+        // Stack Segment Fault (#SS - Vector 12): Catches errors strictly related to the
+        // stack, such as the stack pointer (rsp) becoming corrupted, misaligned, or
         // overflowing its mapped memory.
-        idt.stack_segment_fault.set_handler_fn(stack_segment_fault_handler);
+        idt.stack_segment_fault
+            .set_handler_fn(stack_segment_fault_handler);
         // Invalid Opcode (#UD - Vector 6): Catches illegal or unknown CPU instructions,
-        // which almost always happens when a bad pointer causes the CPU to jump into 
+        // which almost always happens when a bad pointer causes the CPU to jump into
         // random data and try to execute it as code.
         idt.invalid_opcode.set_handler_fn(invaild_opcode_handler);
-        // Non-Maskable Interrupt (#NMI - Vector 2): Catches catastrophic, unrecoverable 
-        // physical hardware errors (like RAM parity failures) and bypasses the CPU's 
+        // Non-Maskable Interrupt (#NMI - Vector 2): Catches catastrophic, unrecoverable
+        // physical hardware errors (like RAM parity failures) and bypasses the CPU's
         // interrupt flag (sti/cli) so it cannot be ignored.
-        idt.non_maskable_interrupt.set_handler_fn(non_maskable_interrupt_handler);
+        idt.non_maskable_interrupt
+            .set_handler_fn(non_maskable_interrupt_handler);
         // Double Fault
         unsafe {
             idt.double_fault
@@ -53,9 +58,19 @@ extern "x86-interrupt" fn page_fault_handler(
     let heap_start = crate::memory::HEAP_START as u64;
     let heap_size = crate::memory::HEAP_SIZE as u64;
     if fault_addr.as_u64() < heap_start || fault_addr.as_u64() >= heap_start + heap_size {
-        crate::serial_print!("EXCEPTION: PAGE FAULT\n{:#?}\n Error code: {:#?}", stack_frame, error_code);
-        crate::serial_println!("EXPECTION: PAGE FAULT: OCCURED AT: {:#x}", fault_addr.as_u64());
-        println!("EXCEPTION: PAGE FAULT\n{:#?}\n Error code: {:#?}", stack_frame, error_code);
+        crate::serial_print!(
+            "EXCEPTION: PAGE FAULT\n{:#?}\n Error code: {:#?}",
+            stack_frame,
+            error_code
+        );
+        crate::serial_println!(
+            "EXPECTION: PAGE FAULT: OCCURED AT: {:#x}",
+            fault_addr.as_u64()
+        );
+        println!(
+            "EXCEPTION: PAGE FAULT\n{:#?}\n Error code: {:#?}",
+            stack_frame, error_code
+        );
         loop {
             x86_64::instructions::hlt();
         }
@@ -63,20 +78,21 @@ extern "x86-interrupt" fn page_fault_handler(
 
     crate::serial_println!("Demand paging: Allocating fresh page for heap");
 
-    let page: x86_64::structures::paging::Page<> = x86_64::structures::paging::Page::containing_address(
-        fault_addr
-    );
-    
+    let page: x86_64::structures::paging::Page =
+        x86_64::structures::paging::Page::containing_address(fault_addr);
+
     // Get 4kb zeroed frame from bitmap allocator
     let frame_addr = crate::memory::allocate_zeroed_frame().expect("FATAL ERROR: Out of memory");
 
-    let physical_addr: x86_64::structures::paging::PhysFrame<> = x86_64::structures::paging::PhysFrame::containing_address(
-        x86_64::PhysAddr::new(frame_addr as u64)
-    );
+    let physical_addr: x86_64::structures::paging::PhysFrame =
+        x86_64::structures::paging::PhysFrame::containing_address(x86_64::PhysAddr::new(
+            frame_addr as u64,
+        ));
 
     // Get active page table and map it
     let active_table = crate::paging::active_level_4_table();
-    let flags = x86_64::structures::paging::PageTableFlags::PRESENT| x86_64::structures::paging::PageTableFlags::WRITABLE;
+    let flags = x86_64::structures::paging::PageTableFlags::PRESENT
+        | x86_64::structures::paging::PageTableFlags::WRITABLE;
 
     crate::paging::map_to(page, physical_addr, flags, active_table)
         .expect("FATAL: demand paging failed to map page");
@@ -98,10 +114,8 @@ extern "x86-interrupt" fn double_fault_handler(
     panic!("EXCEPTION: DOUBLE FAULT\n{:#?}", stack_frame);
 }
 
-
-extern "x86-interrupt" fn tick_handler(_stack_frame: InterruptStackFrame) {
-    // crate::print!(".");
-    crate::apic::LOCAL_APIC.lock().as_ref().unwrap().end_of_interrupt();
+unsafe extern "C" {
+    fn timer_isr();
 }
 
 extern "x86-interrupt" fn keyboard_handler(_stack_frame: InterruptStackFrame) {
@@ -109,34 +123,49 @@ extern "x86-interrupt" fn keyboard_handler(_stack_frame: InterruptStackFrame) {
 
     // The keyboard data port is 0x60
     let mut port = Port::<u8>::new(0x60);
-    
+
     let scancode: u8 = unsafe { port.read() };
-    
+
     crate::serial_println!("Key pressed! Scancode: {}", scancode);
     let mut keyboard = crate::keyboard::KEYBOARD.lock();
     if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
         // If it formed a complete key press/release, process it
-        if let Some(key) = keyboard.process_keyevent(key_event){
+        if let Some(key) = keyboard.process_keyevent(key_event) {
             // We ignore the error if the queue is full for now
             let _ = crate::keyboard::KEYBOARD_EVENTS.push(key);
         }
-    }    // CRITICAL: Acknowledge the interrupt to the Local APIC!
-    crate::apic::LOCAL_APIC.lock().as_ref().unwrap().end_of_interrupt();
+    } // CRITICAL: Acknowledge the interrupt to the Local APIC!
+    crate::apic::LOCAL_APIC
+        .lock()
+        .as_ref()
+        .unwrap()
+        .end_of_interrupt();
 }
 
-
-extern "x86-interrupt" fn general_protection_failure_handler(stack_frame: InterruptStackFrame, error_code: u64) {
-    panic!("EXCEPTION: GENERAL PROTECTION FAILURE\n{:#?}\n error code: {:#?}", stack_frame, error_code);
+extern "x86-interrupt" fn general_protection_failure_handler(
+    stack_frame: InterruptStackFrame,
+    error_code: u64,
+) {
+    panic!(
+        "EXCEPTION: GENERAL PROTECTION FAILURE\n{:#?}\n error code: {:#?}",
+        stack_frame, error_code
+    );
 }
 
-extern "x86-interrupt" fn stack_segment_fault_handler(stack_frame: InterruptStackFrame, error_code: u64) {
-    panic!("EXCEPTION: STACK SEGMENT FAULT\n{:#?}\n error code: {:#?}", stack_frame, error_code);
+extern "x86-interrupt" fn stack_segment_fault_handler(
+    stack_frame: InterruptStackFrame,
+    error_code: u64,
+) {
+    panic!(
+        "EXCEPTION: STACK SEGMENT FAULT\n{:#?}\n error code: {:#?}",
+        stack_frame, error_code
+    );
 }
 
-extern "x86-interrupt" fn invaild_opcode_handler(stack_frame: InterruptStackFrame ) {
+extern "x86-interrupt" fn invaild_opcode_handler(stack_frame: InterruptStackFrame) {
     panic!("EXCEPTION: INVALID OPCODE\n{:#?}", stack_frame);
 }
 
-extern "x86-interrupt" fn non_maskable_interrupt_handler(stack_frame: InterruptStackFrame ) {
+extern "x86-interrupt" fn non_maskable_interrupt_handler(stack_frame: InterruptStackFrame) {
     panic!("EXCEPTION: NON MASKABLE INTERRUPT\n{:#?}", stack_frame);
 }
