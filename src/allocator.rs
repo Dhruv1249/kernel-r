@@ -18,7 +18,7 @@ impl<A> Locked<A> {
     }
     pub fn lock(&self) -> InterruptSafeGuard<'_, A> {
         let saved_state = x86_64::instructions::interrupts::are_enabled();
-        
+
         if saved_state {
             x86_64::instructions::interrupts::disable();
         }
@@ -119,8 +119,19 @@ unsafe impl core::alloc::GlobalAlloc for Locked<HeapAllocator> {
             }
         } else {
             // FALLBACK: Massive allocation (> 2048 bytes).
-            // We bypass the virtual bump allocator and directly map contiguous physical memory.
-            let order = crate::buddy::size_to_order(size);
+            //  Align the requested size to the nearest 4KB (4096 bytes) page boundary.
+            let page_aligned_size = align_to(size, 4096);
+
+            // HARD LIMIT: Prevent allocations larger than 4MB (MAX_ORDER 10 = 1024 frames)
+            if page_aligned_size > 4 * 1024 * 1024 {
+                crate::serial_println!(
+                    "WARNING: Kernel heap refused {} bytes (exceeds 4MB limit)",
+                    page_aligned_size
+                );
+                return core::ptr::null_mut();
+            }
+
+            let order = crate::buddy::size_to_order(page_aligned_size);
 
             let mut buddy = crate::memory::FRAME_ALLOCATOR.lock();
             match buddy.alloc(order) {
@@ -139,7 +150,8 @@ unsafe impl core::alloc::GlobalAlloc for Locked<HeapAllocator> {
             heap.slab.free(ptr, size);
         } else {
             // Traffic Cop: Bypass Slab, send massive blocks directly to Buddy
-            let order = crate::buddy::size_to_order(size);
+            let page_aligned_size = align_to(size, 4096);
+            let order = crate::buddy::size_to_order(page_aligned_size);
 
             crate::memory::FRAME_ALLOCATOR
                 .lock()
