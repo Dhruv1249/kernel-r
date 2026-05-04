@@ -1,5 +1,7 @@
 // src/process.rs
 
+use core::cmp::max;
+
 use alloc::vec;
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -31,6 +33,7 @@ pub struct TaskContext {
     pub ss: u64,
 }
 
+#[derive(Debug, PartialEq, Eq)]
 pub enum TaskState {
     Running,
     Ready,
@@ -40,18 +43,132 @@ pub enum TaskState {
 pub struct Task {
     pub id: u64,
     pub stack_pointer: u64, // The physical location of the RSP register
-    pub context: TaskContext,
-    pub state: TaskState, // e.g., Running, Ready, Sleeping
-    pub page_table: u64,  // The CR3 register (for when we add User Space later)
+    pub state: TaskState,   // e.g., Running, Ready, Sleeping
+    pub page_table: u64,    // The CR3 register (for when we add User Space later)
     pub stack: alloc::vec::Vec<u8>,
+
+    // Stuff for EEVDF Scheduler
+    // EEVDF -> Earliest Eligible Deadline First
+    pub weight: u64,       // Priority (Base 1024)
+    pub real_runtime: u64, // Total execution time
+    pub vruntime: u64,     // Virtual runtime
+    pub lag: i64,          // Lag acquired by the task (can be negative)
+    pub time_slice: u64,   // Assigned time slice for the task
+    pub deadline: u64,     // Virtual Deadline
+
+    // BORE (Burst Oriented Response Enhancement) metric
+    pub burst_score: u64,
+}
+
+pub struct Scheduler {
+    pub tasks: alloc::vec::Vec<Task>,
+    pub total_weight: u64,
+    pub system_runtime: u64, // Global virtual clock
+    pub current_task: Option<usize>,
+}
+
+pub static SCHEDULER: spin::Mutex<Scheduler> = spin::Mutex::new(Scheduler::new());
+
+impl Scheduler {
+    pub const fn new() -> Self {
+        Self {
+            tasks: alloc::vec::Vec::new(),
+            total_weight: 0,
+            system_runtime: 0,
+            current_task: None,
+        }
+    }
+    pub fn add_task(&mut self, task: Task) {
+        self.total_weight += task.weight;
+        self.tasks.push(task);
+    }
+
+    pub fn schedule(&mut self, context: &mut TaskContext) -> *mut TaskContext {
+        // Our first task
+        if self.tasks.is_empty() {
+            return context as *mut TaskContext;
+        }
+
+        // We know the APIC timer ticks exactly once per millisecond
+        let time_consumed: u64 = 1_000_000; // 1ms in nanoseconds
+
+        // If there is a current_task running...
+        if let Some(task_idx) = self.current_task {
+            let task: &mut Task = &mut self.tasks[task_idx];
+
+            // Save its hardware context
+            task.stack_pointer = context as *mut _ as u64;
+
+            // Update Real Runtime
+            task.real_runtime += time_consumed;
+
+            // Update BORE BURST SCORE
+            task.burst_score = (task.burst_score + time_consumed) >> 1;
+
+            // Update System Virtual Time (V)
+            self.system_runtime += (time_consumed << 20) / self.total_weight;
+
+            // Update Task Virtal Runstim
+            task.vruntime = (task.real_runtime << 20) / task.weight;
+
+            // Update Task Lag
+            task.lag = self.system_runtime as i64 - task.vruntime as i64;
+
+            // Update Task Deadline
+            task.update_deadline();
+        }
+
+        let mut winner_idx: usize = 0;
+        let mut is_eligible: bool = false;
+        let mut found_task: bool = false;
+        let mut lowest_deadline: u64 = u64::MAX;
+        for i in 0..self.tasks.len() {
+            let task: &mut Task = &mut self.tasks[i];
+            if task.state == TaskState::Ready || task.state == TaskState::Running {
+                if task.lag >= 0 && lowest_deadline as u64 > task.deadline {
+                    is_eligible = true;
+                    lowest_deadline = task.deadline as u64;
+                    winner_idx = i;
+                    found_task = true;
+                }
+            }
+        }
+
+        if !is_eligible {
+            // No eligible task found
+            // Find the task with the lowest deadline
+            for i in 0..self.tasks.len() {
+                let task: &mut Task = &mut self.tasks[i];
+                if task.state == TaskState::Ready || task.state == TaskState::Running {
+                    if lowest_deadline as u64 > task.deadline {
+                        lowest_deadline = task.deadline as u64;
+                        winner_idx = i;
+                        found_task = true;
+                    }
+                }
+            }
+        }
+
+        // If everyone is sleeping, just return the current context so the CPU can idle
+        if !found_task {
+            crate::serial_println!("No eligible task found! Returning current context");
+            return context as *mut TaskContext;
+        }
+
+        self.current_task = Some(winner_idx);
+        return self.tasks[winner_idx].stack_pointer as *mut TaskContext;
+    }
 }
 
 const TASK_STACK_SIZE: usize = 0x400 * 16; // 16 KB
+const SCHEDULER_TARGET_LATENCY: u64 = 6; // 6 ms Defaul in Linux
+const SCHEDULER_MIN_GRANULARITY: u64 = 4; // 4 ms Default in Linux
+const NICE_0_LOAD: u64 = 1024; // Value base Nice
 
 impl Task {
-    pub fn new(entry_point: u64) -> Self {
+    pub fn new(scheduler: &mut Scheduler, entry_point: u64, weight: u64) -> Self {
         // Allocte memory for the stack
-        let mut stack =  vec![0; TASK_STACK_SIZE];
+        let mut stack = vec![0; TASK_STACK_SIZE];
 
         // Get the highest stack address
         let stack_start = stack.as_mut_ptr() as u64;
@@ -60,7 +177,7 @@ impl Task {
         // Step back 16 bytes to make room to write a 64-bit return address
         let initial_rsp = stack_end - core::mem::size_of::<TaskContext>() as u64;
 
-        let context = TaskContext{
+        let context = TaskContext {
             rip: entry_point,
             cs: 0x8,
             rflags: 0x202,
@@ -68,29 +185,84 @@ impl Task {
             ss: 0x0,
             ..Default::default()
         };
-        
+
         // Write context at the top of the TASK_STACK_SIZE
-        unsafe { core::ptr::write(initial_rsp as *mut TaskContext, context); }
-        
+        unsafe {
+            core::ptr::write(initial_rsp as *mut TaskContext, context);
+        }
+
+        let vruntime: u64 = 0;
+
+        let time_slice: u64;
+
+        if scheduler.total_weight > 0 {
+            time_slice = max(
+                SCHEDULER_MIN_GRANULARITY,
+                ((weight << 20) / scheduler.total_weight) * SCHEDULER_TARGET_LATENCY,
+            );
+        } else {
+            time_slice = max(
+                SCHEDULER_MIN_GRANULARITY,
+                ((weight << 20) / weight) * SCHEDULER_TARGET_LATENCY,
+            );
+        }
+
+        let lag: i64 = scheduler.system_runtime as i64 - vruntime as i64;
+
+        let deadline = vruntime + ((time_slice * NICE_0_LOAD) << 20) / weight;
+
         Self {
             id: 0,
             stack_pointer: initial_rsp,
-            context: TaskContext::default(),
             state: TaskState::Ready,
             page_table: 0,
-            stack
+            stack,
+            weight,
+            real_runtime: 0,
+            vruntime,
+            lag,
+            time_slice,
+            deadline,
+            burst_score: 0,
         }
+    }
+
+    pub fn set_priority(&mut self, priority: u64) {
+        self.weight = priority;
+    }
+
+    pub fn update_deadline(&mut self) {
+        self.vruntime = (self.real_runtime << 20) / self.weight;
+        let virtual_slice = (self.time_slice << 20) / self.weight;
+        self.deadline = self.vruntime + virtual_slice;
     }
 }
 
+pub static SYSTEM_UPTIME_NANOS: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+pub fn update_system_uptime() {
+    // Since our timer ticks at 1000 Hz, we need to add 1,000,000 ns every tick
+    SYSTEM_UPTIME_NANOS.fetch_add(1_000_000, core::sync::atomic::Ordering::Relaxed);
+}
 
 #[unsafe(no_mangle)]
-pub extern "C" fn rust_timer_handler(context: &mut crate::process::TaskContext) -> *mut TaskContext {
-    // 1. Tell the APIC we received the interrupt
-    crate::apic::LOCAL_APIC.lock().as_ref().unwrap().end_of_interrupt();
-    
-    crate::serial_println!("Timer tick! Context is at: {:p}", context);
-    return context;
+pub extern "C" fn rust_timer_handler(
+    context: &mut crate::process::TaskContext,
+) -> *mut TaskContext {
+    // Update the system uptime
+    update_system_uptime();
+    // Tell the APIC we received the interrupt
+    crate::apic::LOCAL_APIC
+        .lock()
+        .as_ref()
+        .unwrap()
+        .end_of_interrupt();
+
+    // Call the scheduler!
+    let next_context = SCHEDULER.lock().schedule(context);
+
+    // crate::serial_println!("Timer tick! Context is at: {:p}", next_context);
+    return next_context;
 }
 
 // Global asm so rust knows how to call this function and doesn't mess with the stack
@@ -101,7 +273,6 @@ core::arch::global_asm!(
     // Cpu just pushed ss, rsp, rflags, cs, rip
     // Push error code
     "push 0",
-    
     // Push general purpose registers
     "push rax",
     "push rcx",
@@ -118,13 +289,11 @@ core::arch::global_asm!(
     "push r13",
     "push r14",
     "push r15",
-
     // Call our rust_timer_handler
     "mov rdi, rsp",
     "call rust_timer_handler",
     // Move our context back to the stack
     "mov rsp, rax",
-
     // Restore the registers
     "pop r15",
     "pop r14",
@@ -141,12 +310,30 @@ core::arch::global_asm!(
     "pop rdx",
     "pop rcx",
     "pop rax",
-
     // Pop the error code
     "add rsp, 8",
-
     // Hardware return (tells CPU to pop the ss, rsp, rflags, cs, rip)
     "iretq",
-
 );
 
+// Test tasks
+pub extern "C" fn task_a() {
+    loop {
+        crate::serial_println!("A");
+        crate::println!("A");
+        // Delay loop to prevent spinlock deadlocks
+        for _ in 0..1_000_000 {
+            core::hint::spin_loop();
+        }
+    }
+}
+
+pub extern "C" fn task_b() {
+    loop {
+        crate::serial_println!("B");
+        crate::println!("B");
+        for _ in 0..1_000_000 {
+            core::hint::spin_loop();
+        }
+    }
+}

@@ -18,6 +18,34 @@ pub unsafe fn disable_legacy_pic() {
     }
 }
 
+fn pit_wait_10ms() {
+    use x86_64::instructions::port::Port;
+    let mut pit_command: Port<u8> = Port::new(0x43);
+    let mut pit_data: Port<u8> = Port::new(0x40);
+
+    // 1.193182 MHz * 0.01 seconds = 11931 ticks (0x2E9B)
+    let ticks: u16 = 11931;
+
+    unsafe {
+        // Command 0x30: Channel 0, Access Lobyte/Hibyte, Mode 0 (Interrupt on terminal count)
+        pit_command.write(0x30);
+        pit_data.write((ticks & 0xFF) as u8); // Low byte
+        pit_data.write(((ticks >> 8) & 0xFF) as u8); // High byte
+
+        // Poll the PIT until it hits 0
+        loop {
+            // Command 0x00: Latch Channel 0 count
+            pit_command.write(0x00);
+            let low = pit_data.read();
+            let high = pit_data.read();
+            let current_count = ((high as u16) << 8) | (low as u16);
+            if current_count == 0 {
+                break;
+            }
+        }
+    }
+}
+
 // Key register offsets
 // Id register used to read the current APIC ID and identify the CPU
 const ID_REG: u64 = 0x20;
@@ -68,13 +96,21 @@ impl LocalApic {
         unsafe { self.write_reg(SPURIOUS_INT_REG, 0x100 | 0xFF) };
     }
 
-    pub fn start_timer(&self) {
+    pub fn calibrate_and_start_timer(&self) {
         unsafe {
-            // Set the timer mode
-            self.write_reg(DIVIDE_CONFIGURATION_REG, 0x3);
-            // Set the timer interval
-            self.write_reg(LVT_TIMER_REG, (1 << 17) | 32);
-            self.write_reg(INIT_COUNT_REG, 0x10000);
+            // Set the interval
+            self.write_reg(DIVIDE_CONFIGURATION_REG, 0x3); // Divide by 16
+            // Set time mode
+            self.write_reg(LVT_TIMER_REG, 32); // one shot mode
+            self.write_reg(INIT_COUNT_REG, 0xFFFFFFFF); // Absolute maximum
+            pit_wait_10ms();
+            let current_count = self.read_reg(CURRENT_COUNT_REG);
+            let ticks_in_10ms = 0xFFFFFFFF - current_count;
+            let ticks_per_1ms = ticks_in_10ms / 10;
+            self.write_reg(LVT_TIMER_REG, (1 << 17) | 32); // Periodic mode
+            // Set the initial count to number of ticks in 1ms (1000 Hz)
+            self.write_reg(INIT_COUNT_REG, ticks_per_1ms);
+            // Now 1 tick = 1,000,000 ns
         }
     }
 }
