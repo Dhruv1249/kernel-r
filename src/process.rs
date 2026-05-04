@@ -108,14 +108,11 @@ impl Scheduler {
             // Update System Virtual Time (V)
             self.system_runtime += (time_consumed << 20) / self.total_weight;
 
-            // Update Task Virtal Runstim
-            task.vruntime = (task.real_runtime << 20) / task.weight;
+            // Update Task Deadline
+            task.update_deadline();
 
             // Update Task Lag
             task.lag = self.system_runtime as i64 - task.vruntime as i64;
-
-            // Update Task Deadline
-            task.update_deadline();
         }
 
         let mut winner_idx: usize = 0;
@@ -161,8 +158,8 @@ impl Scheduler {
 }
 
 const TASK_STACK_SIZE: usize = 0x400 * 16; // 16 KB
-const SCHEDULER_TARGET_LATENCY: u64 = 6; // 6 ms Defaul in Linux
-const SCHEDULER_MIN_GRANULARITY: u64 = 4; // 4 ms Default in Linux
+const SCHEDULER_TARGET_LATENCY: u64 = 6 * 1_000_000; // 6 ms Defaul in Linux
+const SCHEDULER_MIN_GRANULARITY: u64 = 4 * 1_000_000; // 4 ms Default in Linux
 const NICE_0_LOAD: u64 = 1024; // Value base Nice
 
 impl Task {
@@ -193,19 +190,18 @@ impl Task {
 
         let vruntime: u64 = 0;
 
-        let time_slice: u64;
-
-        if scheduler.total_weight > 0 {
-            time_slice = max(
+        let time_slice = if scheduler.total_weight > 0 {
+            max(
                 SCHEDULER_MIN_GRANULARITY,
-                ((weight << 20) / scheduler.total_weight) * SCHEDULER_TARGET_LATENCY,
-            );
+                (weight * SCHEDULER_TARGET_LATENCY) / scheduler.total_weight,
+            )
         } else {
-            time_slice = max(
+            max(
                 SCHEDULER_MIN_GRANULARITY,
-                ((weight << 20) / weight) * SCHEDULER_TARGET_LATENCY,
-            );
-        }
+                (weight * SCHEDULER_TARGET_LATENCY) / weight,
+            )
+        };
+
 
         let lag: i64 = scheduler.system_runtime as i64 - vruntime as i64;
 
@@ -231,9 +227,19 @@ impl Task {
         self.weight = priority;
     }
 
+    pub fn effective_weight(&self) -> u64 {
+        // How many 4ms "penalties" has this task accumulated?
+        let penalty_points = self.burst_score / SCHEDULER_MIN_GRANULARITY;
+
+        // Shift the base weight down by the penalty points.
+        // max(1, ...) ensures we never divide by zero later.
+        core::cmp::max(1, self.weight >> penalty_points)
+    }
+
     pub fn update_deadline(&mut self) {
-        self.vruntime = (self.real_runtime << 20) / self.weight;
-        let virtual_slice = (self.time_slice << 20) / self.weight;
+        let eff_weight = self.effective_weight();
+        self.vruntime = (self.real_runtime << 20) / eff_weight;
+        let virtual_slice = (self.time_slice << 20) / eff_weight;
         self.deadline = self.vruntime + virtual_slice;
     }
 }
