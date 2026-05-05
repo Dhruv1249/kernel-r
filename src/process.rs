@@ -155,6 +155,21 @@ impl Scheduler {
         self.current_task = Some(winner_idx);
         return self.tasks[winner_idx].stack_pointer as *mut TaskContext;
     }
+
+    pub fn sleep_current_task(&mut self) {
+        if let Some(task_idx) = self.current_task {
+            self.tasks[task_idx].state = TaskState::Sleeping;
+        }
+    }
+
+    pub fn wake_task(&mut self, task_idx: usize) {
+        if let Some(task) = self.tasks.get_mut(task_idx) {
+            if task.state == TaskState::Sleeping {
+                task.state = TaskState::Ready;
+            }
+        }
+    }
+
 }
 
 const TASK_STACK_SIZE: usize = 0x400 * 16; // 16 KB
@@ -324,13 +339,20 @@ core::arch::global_asm!(
 
 // Test tasks
 pub extern "C" fn task_a() {
-    loop {
-        crate::serial_println!("A");
-        crate::println!("A");
-        // Delay loop to prevent spinlock deadlocks
-        for _ in 0..1_000_000 {
-            core::hint::spin_loop();
+    loop { 
+        crate::serial_println!("A (Going to sleep...)"); 
+        
+        crate::process::SCHEDULER.lock().sleep_current_task();
+        
+        // Yield loop: Wait until the scheduler changes our state back to Ready/Running
+        while crate::process::SCHEDULER.lock().tasks[0].state == crate::process::TaskState::Sleeping {
+            x86_64::instructions::hlt();
         }
+
+        crate::serial_println!("A (Woken up by Keyboard!)"); 
+        
+        // Do a little work before going back to sleep
+        for _ in 0..5_000_000 { core::hint::spin_loop(); }
     }
 }
 
