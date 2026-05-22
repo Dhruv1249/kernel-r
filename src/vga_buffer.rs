@@ -45,12 +45,12 @@ struct ScreenChar {
 }
 
 const BUFFER_HEIGHT: usize = 25;
-const BUFFER_WIDHT: usize = 80;
+const BUFFER_WIDTH: usize = 80;
 
 #[repr(transparent)]
 struct Buffer {
     // Building 2d array for VGA buffer
-    chars: [[Volatile<ScreenChar>; BUFFER_WIDHT]; BUFFER_HEIGHT],
+    chars: [[Volatile<ScreenChar>; BUFFER_WIDTH]; BUFFER_HEIGHT],
 }
 
 pub struct Writer {
@@ -64,7 +64,7 @@ impl Writer {
         match byte {
             b'\n' => self.new_line(),
             byte => {
-                if self.column_position >= BUFFER_WIDHT {
+                if self.column_position >= BUFFER_WIDTH {
                     self.new_line();
                 }
                 let row = BUFFER_HEIGHT - 1;
@@ -83,7 +83,7 @@ impl Writer {
 
     fn new_line(&mut self) {
         for row in 1..BUFFER_HEIGHT {
-            for col in 0..BUFFER_WIDHT {
+            for col in 0..BUFFER_WIDTH {
                 let character = self.buffer.chars[row][col].read();
                 self.buffer.chars[row - 1][col].write(character);
             }
@@ -99,7 +99,7 @@ impl Writer {
             color_code: self.color_code,
         };
 
-        for col in 0..BUFFER_WIDHT {
+        for col in 0..BUFFER_WIDTH {
             self.buffer.chars[row][col].write(blank_char);
         }
     }

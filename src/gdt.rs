@@ -15,7 +15,7 @@ pub struct Stack {
     buffer: [u8; STACK_SIZE],
 }
 
-pub static mut DOUBLE_FAULT_STACK: Stack = Stack {
+static DOUBLE_FAULT_STACK: Stack = Stack {
     buffer: [0; STACK_SIZE],
 };
 

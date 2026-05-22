@@ -350,6 +350,7 @@ pub extern "C" fn task_a() {
         }
 
         crate::serial_println!("A (Woken up by Keyboard!)"); 
+        crate::println!("A (Woken up by Keyboard!)"); 
         
         // Do a little work before going back to sleep
         for _ in 0..5_000_000 { core::hint::spin_loop(); }

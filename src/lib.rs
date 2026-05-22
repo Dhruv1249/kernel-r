@@ -46,7 +46,7 @@ use core::panic::PanicInfo;
 
 use x86_64::structures::paging::Size4KiB;
 
-use crate::qemu::exit_qemu;
+use crate::{boot_info::TagHeader, qemu::exit_qemu};
 
 fn dump_registers() {
     serial_println!("Dumping registers");
@@ -156,40 +156,50 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
     serial_println!("Multiboot size: {:?}", mbi);
 
     let tag_iter = boot_info::TagIterator::new(multiboot_info_addr);
+    let mut tag_option: Option<*const TagHeader> = None;
 
-    for tag in tag_iter {
-        let tag_header = unsafe { &*tag };
+    for tags in tag_iter {
+        let tag_header = unsafe { &*tags };
 
         if tag_header.typ == 6 {
-            let mmap_entry = unsafe { &*(tag as *const boot_info::MemoryMapTag) };
-
-            let num_entries = (mmap_entry.size - 16) / mmap_entry.entry_size;
-
-            // First entry starts exactly 16 bytes after the tag tag header
-            let first_entry_ptr = (tag as usize + 16) as *const boot_info::MemoryMapEntry;
-
-            let entries =
-                unsafe { core::slice::from_raw_parts(first_entry_ptr, num_entries as usize) };
-
-            let mut allocator = crate::memory::BumpAllocator::init(k_end, entries);
-
-            // Bootstrap the Buddy Allocator!
-            crate::memory::init_physical_memory(entries, &mut allocator);
-
-            serial_print!(
-                "Allocating frame1: {:#x?}\n",
-                crate::memory::allocate_frame()
-            );
-            serial_print!(
-                "Allocating frame2: {:#x?}\n",
-                crate::memory::allocate_frame()
-            );
-            serial_print!(
-                "Allocating frame3: {:#x?}\n",
-                crate::memory::allocate_frame()
-            );
+            tag_option = Some(tags);
         }
     }
+
+    let tag = tag_option.unwrap();
+
+    let mmap_entry = unsafe { &*(tag as *const boot_info::MemoryMapTag) };
+
+    // Assert that the memory map is valid
+    assert!(mmap_entry.entry_size > 0);
+    assert!(mmap_entry.size >= 16);
+    assert_eq!((mmap_entry.size - 16) % mmap_entry.entry_size, 0);
+
+    let num_entries = (mmap_entry.size - 16) / mmap_entry.entry_size;
+
+    // First entry starts exactly 16 bytes after the tag tag header
+    let first_entry_ptr = (tag as usize + 16) as *const boot_info::MemoryMapEntry;
+
+    let entries = unsafe { core::slice::from_raw_parts(first_entry_ptr, num_entries as usize) };
+
+    let mut allocator = crate::memory::BumpAllocator::init(k_end, entries);
+
+    // Bootstrap the Buddy Allocator!
+    crate::memory::init_physical_memory(entries, &mut allocator);
+
+    serial_print!(
+        "Allocating frame1: {:#x?}\n",
+        crate::memory::allocate_frame()
+    );
+    serial_print!(
+        "Allocating frame2: {:#x?}\n",
+        crate::memory::allocate_frame()
+    );
+    serial_print!(
+        "Allocating frame3: {:#x?}\n",
+        crate::memory::allocate_frame()
+    );
+
     // ---  FIND THE MADT PHYSICAL ADDRESS ---
     let mut madt_phys_addr: Option<u64> = None;
 
