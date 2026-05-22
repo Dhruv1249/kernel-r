@@ -33,6 +33,11 @@ mkdir -p target
 # Assemble the boot stub
 nasm -f elf64 src/boot.asm -o target/boot.o
 
+# Compile the C Red-Black Tree logic
+# -ffreestanding: No standard library
+# -mno-red-zone: CRITICAL for kernel code to prevent hardware interrupts from trashing the stack
+clang -target x86_64-unknown-none -ffreestanding -mno-red-zone -c src/rbtree.c -o target/rbtree.o
+
 # Build the kernel
 if [ "$istest" -eq 1 ]; then
   cargo build --features test
@@ -42,7 +47,7 @@ fi
 
 # We need to explicitly link them together using our linker script
 # LLD is the LLVM linker. We pass it our linker.ld, our assembly object, and our Rust binary.
-ld.lld -n -T linker.ld -o target/kernel.elf target/boot.o target/target/debug/libkernel_r.a
+ld.lld -n -T linker.ld -o target/kernel.elf target/boot.o target/target/debug/libkernel_r.a target/rbtree.o
 
 # Create ISO directory structure
 mkdir -p iso/boot/grub

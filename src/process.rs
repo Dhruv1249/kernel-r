@@ -60,27 +60,128 @@ pub struct Task {
     pub burst_score: u64,
 }
 
+use alloc::vec::Vec;
+
+pub enum TaskSlot {
+    Empty { next_free: Option<usize> },
+    Occupied(Task),
+}
+
+pub struct TaskArena {
+    slots: Vec<TaskSlot>,
+    free_head: Option<usize>,
+}
+
+impl TaskArena {
+    pub const fn new() -> Self {
+        Self {
+            slots: Vec::new(), // We still use Vec as the backing storage
+            free_head: None,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.slots.is_empty()
+    }
+
+    /// Inserts a task and returns its permanent, non-shifting ID
+    pub fn insert(&mut self, task: Task) -> usize {
+        if let Some(idx) = self.free_head {
+            // Fast Path: Reuse a dead task's slot in O(1) time
+            if let TaskSlot::Empty { next_free } = self.slots[idx] {
+                self.free_head = next_free;
+                self.slots[idx] = TaskSlot::Occupied(task);
+                return idx;
+            } else {
+                panic!("FATAL: TaskArena free list corrupted");
+            }
+        } else {
+            // Slow Path: Array is full, push a new slot
+            let idx = self.slots.len();
+            self.slots.push(TaskSlot::Occupied(task));
+            idx
+        }
+    }
+
+    /// Removes a task, adding its slot to the free-list
+    pub fn remove(&mut self, id: usize) -> Option<Task> {
+        if id >= self.slots.len() {
+            return None;
+        }
+
+        // Swap out the task, replacing it with an Empty slot pointing to the current free_head
+        let slot = core::mem::replace(
+            &mut self.slots[id],
+            TaskSlot::Empty {
+                next_free: self.free_head,
+            },
+        );
+
+        match slot {
+            TaskSlot::Occupied(task) => {
+                self.free_head = Some(id); // Wire the free-list to this newly freed slot
+                Some(task)
+            }
+            TaskSlot::Empty { .. } => {
+                // It was already empty. Revert the swap and return None.
+                self.slots[id] = slot;
+                None
+            }
+        }
+    }
+
+    /// Safely fetch a mutable reference to a task by ID
+    pub fn get_mut(&mut self, id: usize) -> Option<&mut Task> {
+        if let Some(TaskSlot::Occupied(task)) = self.slots.get_mut(id) {
+            Some(task)
+        } else {
+            None
+        }
+    }
+}
+
 pub struct Scheduler {
-    pub tasks: alloc::vec::Vec<Task>,
+    pub tasks: TaskArena,
     pub total_weight: u64,
     pub system_runtime: u64, // Global virtual clock
     pub current_task: Option<usize>,
+    pub tree_root: *mut SchedNode,
 }
 
 pub static SCHEDULER: spin::Mutex<Scheduler> = spin::Mutex::new(Scheduler::new());
-
+unsafe impl Send for Scheduler {}
 impl Scheduler {
     pub const fn new() -> Self {
         Self {
-            tasks: alloc::vec::Vec::new(),
+            tasks: TaskArena::new(),
             total_weight: 0,
             system_runtime: 0,
             current_task: None,
+            tree_root: core::ptr::null_mut(),
         }
     }
     pub fn add_task(&mut self, task: Task) {
         self.total_weight += task.weight;
-        self.tasks.push(task);
+        let vruntime = task.vruntime;
+
+        let task_id = self.tasks.insert(task) as u64;
+
+        // Allocate the C-compatible struct on the Rust heap
+        let new_node = alloc::boxed::Box::new(SchedNode {
+            vruntime,
+            task_id,
+            left: core::ptr::null_mut(),
+            right: core::ptr::null_mut(),
+            parent_and_color: 0,
+        });
+
+        // Strip away Rust's ownership to get a raw C pointer
+        let raw_node_ptr = alloc::boxed::Box::into_raw(new_node);
+
+        // Pass it to  C code!
+        unsafe {
+            rbtree_insert(&mut self.tree_root, raw_node_ptr);
+        }
     }
 
     pub fn schedule(&mut self, context: &mut TaskContext) -> *mut TaskContext {
@@ -94,71 +195,56 @@ impl Scheduler {
 
         // If there is a current_task running...
         if let Some(task_idx) = self.current_task {
-            let task: &mut Task = &mut self.tasks[task_idx];
+            if let Some(task) = self.tasks.get_mut(task_idx) {
+                // Save its hardware context
+                task.stack_pointer = context as *mut _ as u64;
 
-            // Save its hardware context
-            task.stack_pointer = context as *mut _ as u64;
+                // Update Real Runtime
+                task.real_runtime += time_consumed;
 
-            // Update Real Runtime
-            task.real_runtime += time_consumed;
+                // Update BORE BURST SCORE
+                task.burst_score = (task.burst_score + time_consumed) >> 1;
 
-            // Update BORE BURST SCORE
-            task.burst_score = (task.burst_score + time_consumed) >> 1;
+                // Update System Virtual Time (V)
+                self.system_runtime += (time_consumed << 20) / self.total_weight;
 
-            // Update System Virtual Time (V)
-            self.system_runtime += (time_consumed << 20) / self.total_weight;
+                // Update Task Deadline
+                task.update_deadline();
 
-            // Update Task Deadline
-            task.update_deadline();
-
-            // Update Task Lag
-            task.lag = self.system_runtime as i64 - task.vruntime as i64;
-        }
-
-        let mut winner_idx: usize = 0;
-        let mut is_eligible: bool = false;
-        let mut found_task: bool = false;
-        let mut lowest_deadline: u64 = u64::MAX;
-        for i in 0..self.tasks.len() {
-            let task: &mut Task = &mut self.tasks[i];
-            if task.state == TaskState::Ready || task.state == TaskState::Running {
-                if task.lag >= 0 && lowest_deadline as u64 > task.deadline {
-                    is_eligible = true;
-                    lowest_deadline = task.deadline as u64;
-                    winner_idx = i;
-                    found_task = true;
-                }
+                // Update Task Lag
+                task.lag = self.system_runtime as i64 - task.vruntime as i64;
             }
         }
 
-        if !is_eligible {
-            // No eligible task found
-            // Find the task with the lowest deadline
-            for i in 0..self.tasks.len() {
-                let task: &mut Task = &mut self.tasks[i];
-                if task.state == TaskState::Ready || task.state == TaskState::Running {
-                    if lowest_deadline as u64 > task.deadline {
-                        lowest_deadline = task.deadline as u64;
-                        winner_idx = i;
-                        found_task = true;
-                    }
-                }
-            }
-        }
+        // 1. Ask the C tree for the node with the lowest vruntime
+        let leftmost_node = unsafe { rbtree_leftmost(self.tree_root) };
 
-        // If everyone is sleeping, just return the current context so the CPU can idle
-        if !found_task {
-            crate::serial_println!("No eligible task found! Returning current context");
+        if leftmost_node.is_null() {
+            // The tree is completely empty. Put the CPU to sleep.
+            crate::serial_println!("No tasks in the tree! Returning current context");
             return context as *mut TaskContext;
         }
 
+        // 2. Safely read the task_id out of the C struct
+        let winner_idx = unsafe { (*leftmost_node).task_id as usize };
+
         self.current_task = Some(winner_idx);
-        return self.tasks[winner_idx].stack_pointer as *mut TaskContext;
+
+        // 3. Fetch the hardware context from our Rust TaskArena
+        if let Some(task) = self.tasks.get_mut(winner_idx) {
+            return task.stack_pointer as *mut TaskContext;
+        } else {
+            // If the tree points to a dead/missing ID, we have a severe synchronization bug
+            panic!(
+                "FATAL: RB-Tree returned task_id {} which is missing from the Arena!",
+                winner_idx
+            );
+        }
     }
 
     pub fn sleep_current_task(&mut self) {
         if let Some(task_idx) = self.current_task {
-            self.tasks[task_idx].state = TaskState::Sleeping;
+            self.tasks.get_mut(task_idx).unwrap().state = TaskState::Sleeping;
         }
     }
 
@@ -169,7 +255,6 @@ impl Scheduler {
             }
         }
     }
-
 }
 
 const TASK_STACK_SIZE: usize = 0x400 * 16; // 16 KB
@@ -216,7 +301,6 @@ impl Task {
                 (weight * SCHEDULER_TARGET_LATENCY) / weight,
             )
         };
-
 
         let lag: i64 = scheduler.system_runtime as i64 - vruntime as i64;
 
@@ -337,23 +421,41 @@ core::arch::global_asm!(
     "iretq",
 );
 
+#[repr(C)]
+pub struct SchedNode {
+    pub vruntime: u64,
+    pub task_id: u64,
+    pub left: *mut SchedNode,
+    pub right: *mut SchedNode,
+    pub parent_and_color: usize,
+}
+
+// Define the FFI bindings
+unsafe extern "C" {
+    pub fn rbtree_insert(root: *mut *mut SchedNode, new_node: *mut SchedNode);
+    pub fn rbtree_leftmost(root: *mut SchedNode) -> *mut SchedNode;
+}
+
 // Test tasks
 pub extern "C" fn task_a() {
-    loop { 
-        crate::serial_println!("A (Going to sleep...)"); 
-        
+    loop {
+        crate::serial_println!("A (Going to sleep...)");
+
         crate::process::SCHEDULER.lock().sleep_current_task();
-        
+
         // Yield loop: Wait until the scheduler changes our state back to Ready/Running
-        while crate::process::SCHEDULER.lock().tasks[0].state == crate::process::TaskState::Sleeping {
+        while crate::process::SCHEDULER.lock().tasks.get_mut(0).unwrap().state == crate::process::TaskState::Sleeping
+        {
             x86_64::instructions::hlt();
         }
 
-        crate::serial_println!("A (Woken up by Keyboard!)"); 
-        crate::println!("A (Woken up by Keyboard!)"); 
-        
+        crate::serial_println!("A (Woken up by Keyboard!)");
+        crate::println!("A (Woken up by Keyboard!)");
+
         // Do a little work before going back to sleep
-        for _ in 0..5_000_000 { core::hint::spin_loop(); }
+        for _ in 0..5_000_000 {
+            core::hint::spin_loop();
+        }
     }
 }
 

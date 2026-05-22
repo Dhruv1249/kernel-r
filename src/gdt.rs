@@ -37,7 +37,7 @@ pub fn init() {
 
     let tss = TSS_ONCE.call_once(|| {
         let mut tss = TaskStateSegment::new();
-        let stack_start = VirtAddr::from_ptr(unsafe { &raw const DOUBLE_FAULT_STACK.buffer });
+        let stack_start = VirtAddr::from_ptr({ &raw const DOUBLE_FAULT_STACK.buffer });
         tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = stack_start + STACK_SIZE;
         serial_println!(
             "TSS IST[{}]: {:#x}",
