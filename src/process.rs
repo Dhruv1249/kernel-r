@@ -229,7 +229,7 @@ impl Scheduler {
         }
 
         // 1. Ask the C tree for the node with the lowest vruntime
-        let leftmost_node = unsafe { rbtree_leftmost(self.tree_root) };
+        let leftmost_node = unsafe { rbtree_pick_eevdf(self.tree_root) };
 
         if leftmost_node.is_null() {
             // The tree is completely empty. Put the CPU to sleep.
@@ -266,6 +266,8 @@ impl Scheduler {
         if let Some(task) = self.tasks.get_mut(task_idx) {
             if task.state == TaskState::Sleeping {
                 task.state = TaskState::Ready;
+                task.burst_score = 0; 
+                task.update_deadline();
 
                 if self.current_task != Some(task_idx) {
                     unsafe {
@@ -456,7 +458,7 @@ pub struct SchedNode {
 // Define the FFI bindings
 unsafe extern "C" {
     pub fn rbtree_insert(root: *mut *mut SchedNode, new_node: *mut SchedNode);
-    pub fn rbtree_leftmost(root: *mut SchedNode) -> *mut SchedNode;
+    pub fn rbtree_pick_eevdf(root: *mut SchedNode) -> *mut SchedNode;
     pub fn rbtree_remove(root: *mut *mut SchedNode, node: *mut SchedNode);
 }
 

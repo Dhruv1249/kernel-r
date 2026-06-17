@@ -20,6 +20,17 @@ void rbtree_insert(struct SchedNode **root, struct SchedNode *new_node);
 void rb_insert_fixup(struct SchedNode **root, struct SchedNode *node);
 struct SchedNode *rbtree_leftmost(struct SchedNode *root);
 
+
+static inline uint64_t min_u64(uint64_t a, uint64_t b) { return (a < b) ? a : b; }
+
+// Recalculates the minimum deadline for a node based on its children
+static inline void rb_update_min_deadline(struct SchedNode *n) {
+    if (!n) return;
+    n->min_deadline = n->deadline;
+    if (n->left) n->min_deadline = min_u64(n->min_deadline, n->left->min_deadline);
+    if (n->right) n->min_deadline = min_u64(n->min_deadline, n->right->min_deadline);
+}
+
 // Extract color
 static inline int rb_color(const struct SchedNode *n) {
   return n->parent_and_color & 1;
@@ -358,4 +369,37 @@ struct SchedNode *rbtree_leftmost(struct SchedNode *root) {
     root = root->left;
   }
   return root;
+}
+
+struct SchedNode* rbtree_pick_eevdf(struct SchedNode* root, uint64_t system_vruntime) {
+    struct SchedNode* current = root;
+    struct SchedNode* best = NULL;
+    
+    while (current) {
+        if (current->vruntime <= system_vruntime) {
+            // Current is eligible! Check if it has the best deadline so far.
+            if (!best || current->deadline < best->deadline) {
+                best = current;
+            }
+            
+            // Left children are definitely eligible. Check if they have a better deadline.
+            if (current->left && current->left->min_deadline < (best ? best->deadline : UINT64_MAX)) {
+                current = current->left;
+                continue;
+            }
+            // Right children might be eligible. Check if they have a better deadline.
+            if (current->right && current->right->min_deadline < (best ? best->deadline : UINT64_MAX)) {
+                current = current->right;
+                continue;
+            }
+            break; // No better paths
+        } else {
+            // Current is NOT eligible. Right children are definitely not eligible either.
+            // We MUST go left to find smaller vruntimes.
+            current = current->left;
+        }
+    }
+    
+    // Fallback: If no tasks are strictly eligible, just pick the leftmost node.
+    return best ? best : rbtree_leftmost(root);
 }
