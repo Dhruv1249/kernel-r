@@ -441,7 +441,7 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
     // crate::vga_buffer::WRITER.lock().clear();
 
     let mut test_string = alloc::string::String::new();
-    test_string.push_str("Hello world");
+    test_string.push_str("Hello now");
     println!("Test string: {:?}", test_string);
 
     let mut sched = crate::process::SCHEDULER.lock();

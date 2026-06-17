@@ -58,6 +58,8 @@ pub struct Task {
 
     // BORE (Burst Oriented Response Enhancement) metric
     pub burst_score: u64,
+
+    pub rb_node: *mut SchedNode,
 }
 
 use alloc::vec::Vec;
@@ -148,7 +150,7 @@ pub struct Scheduler {
     pub tree_root: *mut SchedNode,
 }
 
-pub static SCHEDULER: spin::Mutex<Scheduler> = spin::Mutex::new(Scheduler::new());
+pub static SCHEDULER: crate::allocator::Locked<Scheduler> = crate::allocator::Locked::new(Scheduler::new());
 unsafe impl Send for Scheduler {}
 impl Scheduler {
     pub const fn new() -> Self {
@@ -163,6 +165,7 @@ impl Scheduler {
     pub fn add_task(&mut self, task: Task) {
         self.total_weight += task.weight;
         let vruntime = task.vruntime;
+        let deadline = task.deadline;
 
         let task_id = self.tasks.insert(task) as u64;
 
@@ -170,6 +173,8 @@ impl Scheduler {
         let new_node = alloc::boxed::Box::new(SchedNode {
             vruntime,
             task_id,
+            deadline: deadline,
+            min_deadline: deadline,
             left: core::ptr::null_mut(),
             right: core::ptr::null_mut(),
             parent_and_color: 0,
@@ -177,6 +182,7 @@ impl Scheduler {
 
         // Strip away Rust's ownership to get a raw C pointer
         let raw_node_ptr = alloc::boxed::Box::into_raw(new_node);
+        self.tasks.get_mut(task_id as usize).unwrap().rb_node = raw_node_ptr;
 
         // Pass it to  C code!
         unsafe {
@@ -213,6 +219,12 @@ impl Scheduler {
 
                 // Update Task Lag
                 task.lag = self.system_runtime as i64 - task.vruntime as i64;
+
+                if task.state == TaskState::Ready {
+                    unsafe {
+                        rbtree_insert(&mut self.tree_root, task.rb_node);
+                    }
+                }
             }
         }
 
@@ -224,6 +236,8 @@ impl Scheduler {
             crate::serial_println!("No tasks in the tree! Returning current context");
             return context as *mut TaskContext;
         }
+
+        unsafe { rbtree_remove(&mut self.tree_root, leftmost_node); }
 
         // 2. Safely read the task_id out of the C struct
         let winner_idx = unsafe { (*leftmost_node).task_id as usize };
@@ -252,6 +266,12 @@ impl Scheduler {
         if let Some(task) = self.tasks.get_mut(task_idx) {
             if task.state == TaskState::Sleeping {
                 task.state = TaskState::Ready;
+
+                if self.current_task != Some(task_idx) {
+                    unsafe {
+                        rbtree_insert(&mut self.tree_root, task.rb_node);
+                    }
+                }
             }
         }
     }
@@ -319,6 +339,7 @@ impl Task {
             time_slice,
             deadline,
             burst_score: 0,
+            rb_node: core::ptr::null_mut(),
         }
     }
 
@@ -425,6 +446,8 @@ core::arch::global_asm!(
 pub struct SchedNode {
     pub vruntime: u64,
     pub task_id: u64,
+    pub deadline: u64,
+    pub min_deadline: u64,
     pub left: *mut SchedNode,
     pub right: *mut SchedNode,
     pub parent_and_color: usize,
@@ -434,6 +457,7 @@ pub struct SchedNode {
 unsafe extern "C" {
     pub fn rbtree_insert(root: *mut *mut SchedNode, new_node: *mut SchedNode);
     pub fn rbtree_leftmost(root: *mut SchedNode) -> *mut SchedNode;
+    pub fn rbtree_remove(root: *mut *mut SchedNode, node: *mut SchedNode);
 }
 
 // Test tasks
@@ -444,7 +468,13 @@ pub extern "C" fn task_a() {
         crate::process::SCHEDULER.lock().sleep_current_task();
 
         // Yield loop: Wait until the scheduler changes our state back to Ready/Running
-        while crate::process::SCHEDULER.lock().tasks.get_mut(0).unwrap().state == crate::process::TaskState::Sleeping
+        while crate::process::SCHEDULER
+            .lock()
+            .tasks
+            .get_mut(0)
+            .unwrap()
+            .state
+            == crate::process::TaskState::Sleeping
         {
             x86_64::instructions::hlt();
         }
@@ -462,8 +492,8 @@ pub extern "C" fn task_a() {
 pub extern "C" fn task_b() {
     loop {
         crate::serial_println!("B");
-        crate::println!("B");
-        for _ in 0..1_000_000 {
+        // crate::println!("B");
+        for _ in 0..50_000_000 {
             core::hint::spin_loop();
         }
     }

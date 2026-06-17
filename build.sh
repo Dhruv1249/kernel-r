@@ -72,7 +72,7 @@ grub-mkrescue -o kernel.iso iso
 if [ "$isRun" -eq 0 ] && [ "$istest" -eq 0 ]; then
   echo "Build complete"
 elif [ "$isRun" -eq 1 ]; then
-  qemu-system-x86_64 -cdrom kernel.iso
+  qemu-system-x86_64 -enable-kvm -cpu host -cdrom kernel.iso
 else
-  qemu-system-x86_64 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -serial stdio -cdrom kernel.iso
+  qemu-system-x86_64 -enable-kvm -cpu host -device isa-debug-exit,iobase=0xf4,iosize=0x04 -serial stdio -cdrom kernel.iso
 fi

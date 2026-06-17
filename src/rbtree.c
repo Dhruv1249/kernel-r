@@ -7,6 +7,8 @@
 struct SchedNode {
   uint64_t vruntime;
   uint64_t task_id;
+  uint64_t deadline;
+  uint64_t min_deadline;
   struct SchedNode *left;
   struct SchedNode *right;
   uintptr_t
@@ -15,6 +17,8 @@ struct SchedNode {
 
 // Expose the function signatures
 void rbtree_insert(struct SchedNode **root, struct SchedNode *new_node);
+void rb_insert_fixup(struct SchedNode **root, struct SchedNode *node);
+struct SchedNode *rbtree_leftmost(struct SchedNode *root);
 
 // Extract color
 static inline int rb_color(const struct SchedNode *n) {
@@ -132,7 +136,7 @@ void rbtree_insert(struct SchedNode **root, struct SchedNode *node) {
   }
 
   // Restore Red-Black invariants
-  // rb_insert_fixup(root, node);
+  rb_insert_fixup(root, node);
 }
 
 void rb_insert_fixup(struct SchedNode **root, struct SchedNode *node) {
@@ -200,6 +204,153 @@ void rb_insert_fixup(struct SchedNode **root, struct SchedNode *node) {
   rb_set_color(*root, RB_BLACK);
 }
 
+// Helper to safely get color even if node is NULL (NULL nodes are implicitly
+// BLACK)
+static inline int rb_color_safe(struct SchedNode *n) {
+  return n ? rb_color(n) : RB_BLACK;
+}
+
+void rb_remove_fixup(struct SchedNode **root, struct SchedNode *x,
+                     struct SchedNode *x_parent) {
+  struct SchedNode *w; // 'w' will be x's sibling
+
+  // Loop until we reach the root, or x becomes RED (which we can just paint
+  // BLACK to fix)
+  while (x != *root && rb_color_safe(x) == RB_BLACK) {
+
+    // LEFT SYMMETRY: x is the left child
+    if (x == x_parent->left) {
+      w = x_parent->right;
+
+      // CASE 1: Sibling 'w' is RED
+      if (rb_color_safe(w) == RB_RED) {
+        rb_set_color(x_parent, RB_RED);
+        rb_set_color(w, RB_BLACK);
+        rb_rotate_left(root, x_parent);
+        w = x_parent->right;
+      }
+
+      // CASE 2: Sibling 'w' is BLACK, and BOTH of w's children are BLACK
+      else if (rb_color_safe(w->left) == RB_BLACK &&
+               rb_color_safe(w->right) == RB_BLACK) {
+        rb_set_color(w, RB_RED);
+        x = x_parent;
+        x_parent = rb_parent(x);
+      }
+
+      // CASE 3: Sibling 'w' is BLACK, w's left child is RED, w's right child is
+      // BLACK
+      else if (rb_color_safe(w->left) == RB_RED &&
+               rb_color_safe(w->right) == RB_BLACK) {
+        rb_set_color(w->left, RB_BLACK);
+        rb_set_color(w, RB_RED);
+        rb_rotate_right(root, w);
+        w = x_parent->right;
+      }
+
+      // CASE 4: Sibling 'w' is BLACK, and w's right child is RED
+      else {
+        rb_set_color(w, rb_color(x_parent));
+        rb_set_color(x_parent, RB_BLACK);
+        rb_set_color(w->right, RB_BLACK);
+        rb_rotate_left(root, x_parent);
+        x = *root;
+      }
+    }
+    // RIGHT SYMMETRY: x is the right child (Exact mirror of above!)
+    else {
+      w = x_parent->left;
+
+      if (rb_color_safe(w) == RB_RED) {
+        rb_set_color(x_parent, RB_RED);
+        rb_set_color(w, RB_BLACK);
+        rb_rotate_right(root, x_parent);
+        w = x_parent->left;
+      }
+
+      else if (rb_color_safe(w->left) == RB_BLACK &&
+               rb_color_safe(w->right) == RB_BLACK) {
+        rb_set_color(w, RB_RED);
+        x = x_parent;
+        x_parent = rb_parent(x);
+      }
+
+      else if (rb_color_safe(w->right) == RB_RED &&
+               rb_color_safe(w->left) == RB_BLACK) {
+        rb_set_color(w->right, RB_BLACK);
+        rb_set_color(w, RB_RED);
+        rb_rotate_left(root, w);
+        w = x_parent->left;
+      }
+
+      else {
+        rb_set_color(w, rb_color(x_parent));
+        rb_set_color(x_parent, RB_BLACK);
+        rb_set_color(w->left, RB_BLACK);
+        rb_rotate_right(root, x_parent);
+        x = *root;
+      }
+    }
+  }
+
+  // Finally, whatever x ended up as, paint it BLACK to absorb the extra
+  // blackness.
+  if (x)
+    rb_set_color(x, RB_BLACK);
+}
+
+static inline void rb_transplant(struct SchedNode **root, struct SchedNode *u,
+                                 struct SchedNode *v) {
+  if (!rb_parent(u))
+    *root = v;
+  else if (u == rb_parent(u)->left)
+    rb_parent(u)->left = v;
+  else
+    rb_parent(u)->right = v;
+  if (v)
+    rb_set_parent(v, rb_parent(u));
+}
+
+void rbtree_remove(struct SchedNode **root, struct SchedNode *z) {
+  struct SchedNode *y = z, *x;
+  struct SchedNode *x_parent = NULL;
+  int y_original_color = rb_color(y);
+
+  if (!z->left) {
+    x = z->right;
+    x_parent = rb_parent(z);
+    rb_transplant(root, z, z->right);
+  } else if (!z->right) {
+    x = z->left;
+    x_parent = rb_parent(z);
+    rb_transplant(root, z, z->left);
+  } else {
+    y = rbtree_leftmost(z->right);
+    y_original_color = rb_color(y);
+    x = y->right;
+
+    if (rb_parent(y) == z) {
+      x_parent = y;
+
+    } else {
+      x_parent = rb_parent(y);
+      rb_transplant(root, y, x);
+      y->right = z->right;
+      if (y->right)
+        rb_set_parent(y->right, y);
+    }
+
+    rb_transplant(root, z, y);
+    y->left = z->left;
+    if (y->left)
+      rb_set_parent(y->left, y);
+
+    rb_set_color(y, rb_color(z));
+  }
+
+  if (y_original_color == RB_BLACK)
+    rb_remove_fixup(root, x, x_parent);
+}
 struct SchedNode *rbtree_leftmost(struct SchedNode *root) {
   if (!root)
     return NULL;
