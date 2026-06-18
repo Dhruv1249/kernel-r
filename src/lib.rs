@@ -41,6 +41,7 @@ mod qemu;
 mod queue;
 mod serial;
 mod slab;
+mod sync;
 mod vga_buffer;
 use core::panic::PanicInfo;
 
@@ -446,12 +447,15 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
 
     let mut sched = crate::process::SCHEDULER.lock();
 
+    let idle_task = crate::process::Task::new(&mut sched, crate::process::idle_task as *const () as u64, 1024);
+
     // Weight 1024 for standard priority
     let t1 =
         crate::process::Task::new(&mut sched, crate::process::task_a as *const () as u64, 1024);
     let t2 =
         crate::process::Task::new(&mut sched, crate::process::task_b as *const () as u64, 1024);
 
+    sched.set_idle_task(idle_task);
     sched.add_task(t1);
     sched.add_task(t2);
     drop(sched); // CRITICAL: Unlock before enabling interrupts!

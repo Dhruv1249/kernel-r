@@ -38,6 +38,7 @@ pub enum TaskState {
     Running,
     Ready,
     Sleeping,
+    Blocked,
 }
 
 pub struct Task {
@@ -60,6 +61,7 @@ pub struct Task {
     pub burst_score: u64,
 
     pub rb_node: *mut SchedNode,
+    pub next_waiter: Option<usize>,
 }
 
 use alloc::vec::Vec;
@@ -142,15 +144,25 @@ impl TaskArena {
     }
 }
 
+pub unsafe extern "C" fn idle_task() {
+    loop {
+        unsafe {
+            core::arch::asm!("hlt");
+        }
+    }
+}
+
 pub struct Scheduler {
     pub tasks: TaskArena,
     pub total_weight: u64,
     pub system_runtime: u64, // Global virtual clock
     pub current_task: Option<usize>,
     pub tree_root: *mut SchedNode,
+    pub idle_task_id: Option<usize>,
 }
 
-pub static SCHEDULER: crate::allocator::Locked<Scheduler> = crate::allocator::Locked::new(Scheduler::new());
+pub static SCHEDULER: crate::allocator::Locked<Scheduler> =
+    crate::allocator::Locked::new(Scheduler::new());
 unsafe impl Send for Scheduler {}
 impl Scheduler {
     pub const fn new() -> Self {
@@ -160,6 +172,7 @@ impl Scheduler {
             system_runtime: 0,
             current_task: None,
             tree_root: core::ptr::null_mut(),
+            idle_task_id: None,
         }
     }
     pub fn add_task(&mut self, task: Task) {
@@ -168,6 +181,7 @@ impl Scheduler {
         let deadline = task.deadline;
 
         let task_id = self.tasks.insert(task) as u64;
+        self.tasks.get_mut(task_id as usize).unwrap().id = task_id;
 
         // Allocate the C-compatible struct on the Rust heap
         let new_node = alloc::boxed::Box::new(SchedNode {
@@ -220,8 +234,11 @@ impl Scheduler {
                 // Update Task Lag
                 task.lag = self.system_runtime as i64 - task.vruntime as i64;
 
-                if task.state == TaskState::Ready {
+                if task.state == TaskState::Ready && task.id as usize != self.idle_task_id.unwrap()
+                {
                     unsafe {
+                        (*task.rb_node).vruntime = task.vruntime;
+                        (*task.rb_node).deadline = task.deadline;
                         rbtree_insert(&mut self.tree_root, task.rb_node);
                     }
                 }
@@ -232,12 +249,18 @@ impl Scheduler {
         let leftmost_node = unsafe { rbtree_pick_eevdf(self.tree_root) };
 
         if leftmost_node.is_null() {
-            // The tree is completely empty. Put the CPU to sleep.
-            crate::serial_println!("No tasks in the tree! Returning current context");
-            return context as *mut TaskContext;
+            if let Some(idle_task_id) = self.idle_task_id {
+                // Update current_task so we don't accidentally save the idle task's context over a real task next tick
+                self.current_task = Some(idle_task_id);
+                return self.tasks.get_mut(idle_task_id).unwrap().stack_pointer as *mut TaskContext;
+            } else {
+                panic!("FATAL: Scheduling tree is empty and no idle task is set!");
+            }
         }
 
-        unsafe { rbtree_remove(&mut self.tree_root, leftmost_node); }
+        unsafe {
+            rbtree_remove(&mut self.tree_root, leftmost_node);
+        }
 
         // 2. Safely read the task_id out of the C struct
         let winner_idx = unsafe { (*leftmost_node).task_id as usize };
@@ -256,6 +279,12 @@ impl Scheduler {
         }
     }
 
+    pub fn set_idle_task(&mut self, task: Task) {
+        let task_id = self.tasks.insert(task) as u64;
+        self.tasks.get_mut(task_id as usize).unwrap().id = task_id;
+        self.idle_task_id = Some(task_id as usize);
+    }
+
     pub fn sleep_current_task(&mut self) {
         if let Some(task_idx) = self.current_task {
             self.tasks.get_mut(task_idx).unwrap().state = TaskState::Sleeping;
@@ -264,13 +293,15 @@ impl Scheduler {
 
     pub fn wake_task(&mut self, task_idx: usize) {
         if let Some(task) = self.tasks.get_mut(task_idx) {
-            if task.state == TaskState::Sleeping {
+            if task.state == TaskState::Sleeping || task.state == TaskState::Blocked {
                 task.state = TaskState::Ready;
-                task.burst_score = 0; 
+                task.burst_score = 0;
                 task.update_deadline();
 
                 if self.current_task != Some(task_idx) {
                     unsafe {
+                        (*task.rb_node).vruntime = task.vruntime;
+                        (*task.rb_node).deadline = task.deadline;
                         rbtree_insert(&mut self.tree_root, task.rb_node);
                     }
                 }
@@ -342,6 +373,7 @@ impl Task {
             deadline,
             burst_score: 0,
             rb_node: core::ptr::null_mut(),
+            next_waiter: None,
         }
     }
 
@@ -463,40 +495,26 @@ unsafe extern "C" {
 }
 
 // Test tasks
+
+use crate::sync::Mutex;
+
+pub static TEST_MUTEX: Mutex<usize> = Mutex::new(0);
+
 pub extern "C" fn task_a() {
     loop {
-        crate::serial_println!("A (Going to sleep...)");
+        crate::println!("Task A going to sleep waiting for keypress...");
+        crate::interrupt::KEYBOARD_SEMAPHORE.acquire();
 
-        crate::process::SCHEDULER.lock().sleep_current_task();
-
-        // Yield loop: Wait until the scheduler changes our state back to Ready/Running
-        while crate::process::SCHEDULER
-            .lock()
-            .tasks
-            .get_mut(0)
-            .unwrap()
-            .state
-            == crate::process::TaskState::Sleeping
-        {
-            x86_64::instructions::hlt();
-        }
-
-        crate::serial_println!("A (Woken up by Keyboard!)");
-        crate::println!("A (Woken up by Keyboard!)");
-
-        // Do a little work before going back to sleep
-        for _ in 0..5_000_000 {
-            core::hint::spin_loop();
+        if let Some(key) = crate::keyboard::KEYBOARD_EVENTS.pop() {
+            crate::println!("Task A woke up and received key: {:?}", key);
         }
     }
 }
 
 pub extern "C" fn task_b() {
     loop {
-        crate::serial_println!("B");
-        // crate::println!("B");
-        for _ in 0..50_000_000 {
-            core::hint::spin_loop();
+        unsafe {
+            core::arch::asm!("hlt");
         }
     }
 }

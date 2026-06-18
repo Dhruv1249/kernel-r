@@ -118,6 +118,8 @@ unsafe extern "C" {
     fn timer_isr();
 }
 
+pub static KEYBOARD_SEMAPHORE: crate::sync::Semaphore = crate::sync::Semaphore::new(0);
+
 extern "x86-interrupt" fn keyboard_handler(_stack_frame: InterruptStackFrame) {
     use x86_64::instructions::port::Port;
 
@@ -133,9 +135,10 @@ extern "x86-interrupt" fn keyboard_handler(_stack_frame: InterruptStackFrame) {
         if let Some(key) = keyboard.process_keyevent(key_event) {
             // We ignore the error if the queue is full for now
             let _ = crate::keyboard::KEYBOARD_EVENTS.push(key);
+            KEYBOARD_SEMAPHORE.release();
         }
-    } 
-    crate::process::SCHEDULER.lock().wake_task(0);
+    }
+    // crate::process::SCHEDULER.lock().wake_task(1);
     // CRITICAL: Acknowledge the interrupt to the Local APIC!
     crate::apic::LOCAL_APIC
         .lock()
