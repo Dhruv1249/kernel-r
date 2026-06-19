@@ -445,15 +445,30 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
     test_string.push_str("Hello now");
     println!("Test string: {:?}", test_string);
 
+    use x86_64::registers::control::Cr3;
+    let (level_4_page_table_frame, _flags) = Cr3::read();
+    let kernel_cr3_phys = level_4_page_table_frame.start_address().as_u64();
+
+    let process_0 = crate::process::Process {
+        pid: 0,
+        page_table: kernel_cr3_phys,
+    };
+
     let mut sched = crate::process::SCHEDULER.lock();
 
-    let idle_task = crate::process::Task::new(&mut sched, crate::process::idle_task as *const () as u64, 1024);
+    sched.processes.push(Some(process_0));
+
+    let idle_task = crate::process::Thread::new(
+        &mut sched,
+        crate::process::idle_task as *const () as u64,
+        1024,
+    );
 
     // Weight 1024 for standard priority
     let t1 =
-        crate::process::Task::new(&mut sched, crate::process::task_a as *const () as u64, 1024);
+        crate::process::Thread::new(&mut sched, crate::process::task_a as *const () as u64, 1024);
     let t2 =
-        crate::process::Task::new(&mut sched, crate::process::task_b as *const () as u64, 1024);
+        crate::process::Thread::new(&mut sched, crate::process::task_b as *const () as u64, 1024);
 
     sched.set_idle_task(idle_task);
     sched.add_task(t1);
@@ -484,32 +499,6 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
             .unwrap()
             .init_keyboard();
     }
-    // let mut task_a = crate::process::Task {
-    //     id: 0,
-    //     stack_pointer: 0,
-    //     context: crate::process::TaskContext::default(),
-    //     state: crate::process::TaskState::Running,
-    //     page_table: 0,
-    //     stack: alloc::vec::Vec::new(), // Empty, we are using the boot stack
-    // };
-    //
-    //  Create the real Task B, pointing to our example function
-    // let task_b = crate::process::Task::new(example_task as u64);
-
-    // crate::serial_println!("Initiating Context Switch...");
-
-    // // Pull the trigger!
-    // unsafe {
-    //     crate::process::switch_task(
-    //         &mut task_a.context,
-    //         &mut task_a.stack_pointer,
-    //         &task_b.context,
-    //         task_b.stack_pointer,
-    //     );
-    // }
-    //
-    // // If the switch works, the CPU jumps to Task B, and this line NEVER PRINTS.
-    // crate::serial_println!("FATAL: If you see this, the context switch failed.");
 
     crate::serial_println!("Interrupts enabled. Waiting for keyboard input...");
     loop {

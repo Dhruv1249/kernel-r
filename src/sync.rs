@@ -28,7 +28,7 @@ impl WaitQueue {
         let current_id = sched.current_task.expect("FATAL: No current task!");
         {
             let current_task = sched.tasks.get_mut(current_id).unwrap();
-            current_task.state = crate::process::TaskState::Blocked;
+            current_task.state = crate::process::ThreadState::Blocked;
             current_task.next_waiter = None
         }
 
