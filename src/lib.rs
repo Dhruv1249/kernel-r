@@ -464,6 +464,8 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
         1024,
     );
 
+    let test_t = crate::process::Thread::new(&mut sched, mortal_task as *const () as u64, 1024);
+
     // Weight 1024 for standard priority
     let t1 =
         crate::process::Thread::new(&mut sched, crate::process::task_a as *const () as u64, 1024);
@@ -471,6 +473,7 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
         crate::process::Thread::new(&mut sched, crate::process::task_b as *const () as u64, 1024);
 
     sched.set_idle_task(idle_task);
+    sched.add_task(test_t);
     sched.add_task(t1);
     sched.add_task(t2);
     drop(sched); // CRITICAL: Unlock before enabling interrupts!
@@ -542,3 +545,7 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
 //     serial_println!("Running tests...");
 //     test_runner(&[( "testing",&testing )]);
 // }
+//
+extern "C" fn mortal_task() {
+    crate::serial_println!("I am a mortal thread. I will now return normally.");
+}

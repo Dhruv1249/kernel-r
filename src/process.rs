@@ -35,6 +35,7 @@ pub enum ThreadState {
     Ready,
     Sleeping,
     Blocked,
+    Zombie,
 }
 
 pub struct Process {
@@ -144,6 +145,26 @@ impl ThreadArena {
     }
 }
 
+pub fn exit_thread() -> ! {
+    let mut sched = SCHEDULER.lock();
+    let tid = sched
+        .current_task
+        .expect("FATAL: Phantome thread called exit");
+    sched.tasks.get_mut(tid).unwrap().state = ThreadState::Zombie;
+
+    drop(sched);
+
+    unsafe {
+        core::arch::asm!("int 0x20");
+    }
+
+    loop {
+        unsafe {
+            core::arch::asm!("hlt");
+        }
+    }
+}
+
 pub unsafe extern "C" fn idle_task() {
     loop {
         unsafe {
@@ -218,6 +239,17 @@ impl Scheduler {
         // If there is a current_task running...
         if let Some(task_idx) = self.current_task {
             if let Some(task) = self.tasks.get_mut(task_idx) {
+                if task.state == ThreadState::Zombie {
+                    let raw_node = task.rb_node;
+                    if !raw_node.is_null() {
+                        // Re-box it and let it immediately go out of scope to free the heap memory!
+                        let _ = unsafe { alloc::boxed::Box::from_raw(raw_node) };
+                    }
+                    self.tasks.remove(task_idx);
+                    self.current_task = None;
+                    return self.schedule(context);
+                }
+
                 // Save its hardware context
                 task.stack_pointer = context as *mut _ as u64;
 
@@ -351,14 +383,23 @@ impl Thread {
         let stack_start = stack.as_mut_ptr() as u64;
         let stack_end = stack_start + TASK_STACK_SIZE as u64;
 
+        let return_addr_ptr = stack_end - 8;
+
+        unsafe {
+            core::ptr::write(
+                return_addr_ptr as *mut u64,
+                crate::process::exit_thread as *const () as u64,
+            );
+        }
+
         // Step back 16 bytes to make room to write a 64-bit return address
-        let initial_rsp = stack_end - core::mem::size_of::<ThreadContext>() as u64;
+        let initial_rsp = return_addr_ptr - core::mem::size_of::<ThreadContext>() as u64;
 
         let context = ThreadContext {
             rip: entry_point,
             cs: 0x8,
             rflags: 0x202,
-            rsp: initial_rsp,
+            rsp: return_addr_ptr,
             ss: 0x0,
             ..Default::default()
         };
