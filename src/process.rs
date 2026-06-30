@@ -572,9 +572,8 @@ pub static TEST_MUTEX: Mutex<usize> = Mutex::new(0);
 pub extern "C" fn task_a() {
     loop {
         crate::println!("Thread A going to sleep waiting for keypress...");
-        crate::interrupt::KEYBOARD_SEMAPHORE.acquire();
 
-        if let Some(key) = crate::keyboard::KEYBOARD_EVENTS.pop() {
+        if let Some(key) = crate::keyboard::KEYBOARD_MAILBOX.receive() {
             crate::println!("Thread A woke up and received key: {:?}", key);
         }
     }
