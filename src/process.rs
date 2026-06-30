@@ -163,7 +163,6 @@ pub fn exit_thread() -> ! {
     }
 
     drop(sched);
-
     unsafe {
         core::arch::asm!("int 0x20");
     }
@@ -614,29 +613,19 @@ use crate::sync::Mutex;
 pub static TEST_MUTEX: Mutex<usize> = Mutex::new(0);
 
 pub extern "C" fn task_a() {
-    crate::serial_println!("Thread A: Spawning Task C...");
-    
-    let child_tid = spawn(task_c, 1024);
-    
-    crate::serial_println!("Thread A: Waiting for Task C (TID {}) to finish...", child_tid);
-    
-    join(child_tid);
-    
-    crate::serial_println!("Thread A: Task C finished! I am awake again.");
-    
     loop {
-        unsafe { core::arch::asm!("hlt"); }
-    }
-}
+        crate::serial_println!("Thread A going to sleep waiting for keypress...");
 
-pub extern "C" fn task_c() {
-    crate::serial_println!("Thread C: I am alive!");
-    crate::serial_println!("Thread C: Doing some work...");
-    
-    yield_now();
-    yield_now();
-    
-    crate::serial_println!("Thread C: Work done. Exiting now!");
+        let (code, stack) = crate::paging::setup_user_sandbox();
+        unsafe { crate::gdt::jump_to_user_space(code, stack); }
+
+        // if let Some(key) = crate::keyboard::KEYBOARD_MAILBOX.receive() {
+        //     match key {
+        //         pc_keyboard::DecodedKey::Unicode(character) => crate::print!("{}", character),
+        //         pc_keyboard::DecodedKey::RawKey(_key) => continue,
+        //     }
+        // }
+    }
 }
 
 pub extern "C" fn task_b() {

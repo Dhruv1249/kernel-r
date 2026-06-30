@@ -32,16 +32,19 @@ pub fn map_to(
             Some(frame_addr) => {
                 let phy_addr = x86_64::PhysAddr::new(frame_addr as u64);
 
-                let table_flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+                let table_flags = PageTableFlags::PRESENT
+                    | PageTableFlags::WRITABLE
+                    | PageTableFlags::USER_ACCESSIBLE;
                 p4_entry.set_addr(phy_addr, table_flags);
             }
             None => {
                 return Err(MapToError::FrameAllocationFailed);
             }
         }
-    } else{
+    } else {
         // Ensure that is has the correct flags
         let required_flags = flags & (PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE);
+
         p4_entry.set_flags(p4_entry.flags() | required_flags);
     }
 
@@ -60,7 +63,9 @@ pub fn map_to(
         match frame_addr {
             Some(frame_addr) => {
                 let phy_addr = x86_64::PhysAddr::new(frame_addr as u64);
-                let table_flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+                let table_flags = PageTableFlags::PRESENT
+                    | PageTableFlags::WRITABLE
+                    | PageTableFlags::USER_ACCESSIBLE;
                 p3_entry.set_addr(phy_addr, table_flags);
             }
             None => {
@@ -69,7 +74,10 @@ pub fn map_to(
         }
     } else {
         // Ensure that is has the correct flags
-        let required_flags = flags & (PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE);
+        let required_flags = flags
+            & (PageTableFlags::PRESENT
+                | PageTableFlags::WRITABLE
+                | PageTableFlags::USER_ACCESSIBLE);
         p3_entry.set_flags(p3_entry.flags() | required_flags);
     }
 
@@ -88,7 +96,9 @@ pub fn map_to(
         match frame_addr {
             Some(frame_addr) => {
                 let phy_addr = x86_64::PhysAddr::new(frame_addr as u64);
-                let table_flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+                let table_flags = PageTableFlags::PRESENT
+                    | PageTableFlags::WRITABLE
+                    | PageTableFlags::USER_ACCESSIBLE;
                 p2_entry.set_addr(phy_addr, table_flags);
             }
             None => {
@@ -98,6 +108,7 @@ pub fn map_to(
     } else {
         // Ensure that is has the correct flags
         let required_flags = flags & (PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE);
+
         p2_entry.set_flags(p2_entry.flags() | required_flags);
     }
 
@@ -231,4 +242,47 @@ pub fn translate_addr(virt_addr: x86_64::VirtAddr) -> Option<x86_64::PhysAddr> {
 
     // Combine them for the exact byte address!
     Some(x86_64::PhysAddr::new(frame_base + page_offset))
+}
+
+/// Creates a minimal Ring 3 environment and returns (Code_Addr, Stack_Top_Addr)
+pub fn setup_user_sandbox() -> (u64, u64) {
+    let active_table = crate::paging::active_level_4_table();
+
+    // The user flags required to survive Ring 3 memory accesses
+    let user_flags =
+        PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+
+    let code_virt_addr = x86_64::VirtAddr::new(0x4000_0000); // 1 GB mark
+    let stack_virt_addr = x86_64::VirtAddr::new(0x8000_0000); // 2 GB mark
+
+    let code_phys_addr = crate::memory::allocate_frame().expect("OOM");
+    let stack_phys_addr = crate::memory::allocate_frame().expect("OOM");
+
+    let code_page =
+        Page::<x86_64::structures::paging::Size4KiB>::containing_address(code_virt_addr);
+    let code_frame = PhysFrame::<x86_64::structures::paging::Size4KiB>::containing_address(
+        x86_64::PhysAddr::new(code_phys_addr as u64),
+    );
+
+    let stack_page =
+        Page::<x86_64::structures::paging::Size4KiB>::containing_address(stack_virt_addr);
+    let stack_frame = PhysFrame::<x86_64::structures::paging::Size4KiB>::containing_address(
+        x86_64::PhysAddr::new(stack_phys_addr as u64),
+    );
+
+    crate::paging::map_to(code_page, code_frame, user_flags, active_table).expect("OOM");
+    crate::paging::map_to(stack_page, stack_frame, user_flags, active_table).expect("OOM");
+
+    let machine_code: [u8; 2] = [0xEB, 0xFE]; // jmp $ (infinite loop)
+
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            machine_code.as_ptr(),
+            code_virt_addr.as_mut_ptr::<u8>(),
+            machine_code.len(),
+        );
+    }
+
+    // Note: Stacks grow downwards, so return the *top* of the stack page!
+    (code_virt_addr.as_u64(), stack_virt_addr.as_u64() + 4096)
 }
