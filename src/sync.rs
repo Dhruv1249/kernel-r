@@ -22,7 +22,13 @@ impl WaitQueue {
     }
 
     pub fn wait(&self) {
-        let mut sched = crate::process::SCHEDULER.lock();
+        self.wait_with_guard(crate::process::SCHEDULER.lock());
+    }
+
+    pub fn wait_with_guard(
+        &self, 
+        mut sched: crate::allocator::InterruptSafeGuard<'_, crate::process::Scheduler>
+    ) {
         let mut state = self.state.lock();
 
         let current_id = sched.current_task.expect("FATAL: No current task!");
@@ -47,6 +53,25 @@ impl WaitQueue {
 
         unsafe {
             core::arch::asm!("int 0x20");
+        }
+    }
+
+    pub fn wake_all(&self ,sched: &mut crate::process::Scheduler) {
+        let mut state = self.state.lock();
+
+        while let Some(head_id) = state.head {
+            let next_waiter = {
+                let head_task = sched.tasks.get_mut(head_id).unwrap();
+                head_task.next_waiter
+            };
+
+            state.head = next_waiter;
+
+            if state.head.is_none() {
+                state.tail = None;
+            }
+
+            sched.wake_task(head_id);
         }
     }
 

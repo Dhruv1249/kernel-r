@@ -65,6 +65,8 @@ pub struct Thread {
 
     pub rb_node: *mut SchedNode,
     pub next_waiter: Option<usize>,
+
+    pub join_queue: crate::sync::WaitQueue,
 }
 
 pub enum ThreadSlot {
@@ -151,6 +153,14 @@ pub fn exit_thread() -> ! {
         .current_task
         .expect("FATAL: Phantome thread called exit");
     sched.tasks.get_mut(tid).unwrap().state = ThreadState::Zombie;
+    let queue_ptr: *const crate::sync::WaitQueue = {
+        let task = sched.tasks.get_mut(tid).unwrap();
+        &task.join_queue as *const _
+    };
+
+    unsafe {
+        (*queue_ptr).wake_all(&mut *sched);
+    }
 
     drop(sched);
 
@@ -198,7 +208,7 @@ impl Scheduler {
             idle_task_id: None,
         }
     }
-    pub fn add_task(&mut self, task: Thread) {
+    pub fn add_task(&mut self, task: Thread) -> usize {
         self.total_weight += task.weight;
         let vruntime = task.vruntime;
         let deadline = task.deadline;
@@ -225,6 +235,8 @@ impl Scheduler {
         unsafe {
             rbtree_insert(&mut self.tree_root, raw_node_ptr);
         }
+
+        task_id as usize
     }
 
     pub fn schedule(&mut self, context: &mut ThreadContext) -> *mut ThreadContext {
@@ -443,6 +455,7 @@ impl Thread {
             burst_score: 0,
             rb_node: core::ptr::null_mut(),
             next_waiter: None,
+            join_queue: crate::sync::WaitQueue::new(),
         }
     }
 
@@ -492,6 +505,37 @@ pub extern "C" fn rust_timer_handler(
 
     // crate::serial_println!("Timer tick! Context is at: {:p}", next_context);
     return next_context;
+}
+
+// achieves the exact same context switch instantly!
+pub fn yield_now() {
+    unsafe {
+        core::arch::asm!("int 0x20");
+    }
+}
+
+// Spawns a new thread and returns its ID
+pub fn spawn(entry_point: extern "C" fn(), weight: u64) -> usize {
+    let mut sched = SCHEDULER.lock();
+    let thread = Thread::new(&mut sched, entry_point as u64, weight);
+    sched.add_task(thread)
+}
+
+pub fn join(target_tid: usize) {
+    let mut sched = SCHEDULER.lock();
+    if let Some(target_thread) = sched.tasks.get_mut(target_tid) {
+        if target_thread.state == ThreadState::Zombie {
+            return;
+        }
+
+        let queue_ptr: *const crate::sync::WaitQueue = &target_thread.join_queue as *const _;
+
+        unsafe {
+            (*queue_ptr).wait_with_guard(sched);
+        }
+    } else {
+        return;
+    }
 }
 
 // Global asm so rust knows how to call this function and doesn't mess with the stack
@@ -570,13 +614,29 @@ use crate::sync::Mutex;
 pub static TEST_MUTEX: Mutex<usize> = Mutex::new(0);
 
 pub extern "C" fn task_a() {
+    crate::serial_println!("Thread A: Spawning Task C...");
+    
+    let child_tid = spawn(task_c, 1024);
+    
+    crate::serial_println!("Thread A: Waiting for Task C (TID {}) to finish...", child_tid);
+    
+    join(child_tid);
+    
+    crate::serial_println!("Thread A: Task C finished! I am awake again.");
+    
     loop {
-        crate::println!("Thread A going to sleep waiting for keypress...");
-
-        if let Some(key) = crate::keyboard::KEYBOARD_MAILBOX.receive() {
-            crate::println!("Thread A woke up and received key: {:?}", key);
-        }
+        unsafe { core::arch::asm!("hlt"); }
     }
+}
+
+pub extern "C" fn task_c() {
+    crate::serial_println!("Thread C: I am alive!");
+    crate::serial_println!("Thread C: Doing some work...");
+    
+    yield_now();
+    yield_now();
+    
+    crate::serial_println!("Thread C: Work done. Exiting now!");
 }
 
 pub extern "C" fn task_b() {
