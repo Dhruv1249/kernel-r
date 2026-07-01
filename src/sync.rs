@@ -1,101 +1,44 @@
 // src/sync.rs
 
-use core::usize;
-
-struct QueueState {
-    head: Option<usize>,
-    tail: Option<usize>,
+pub struct QueueState {
+    pub waiters: alloc::collections::VecDeque<usize>,
 }
 
 pub struct WaitQueue {
-    state: spin::Mutex<QueueState>,
+    pub state: spin::Mutex<QueueState>,
 }
 
 impl WaitQueue {
     pub const fn new() -> Self {
         Self {
             state: spin::Mutex::new(QueueState {
-                head: None,
-                tail: None,
+                waiters: alloc::collections::VecDeque::new(),
             }),
         }
     }
 
-    pub fn wait(&self) {
-        self.wait_with_guard(crate::process::SCHEDULER.lock());
-    }
-
-    pub fn wait_with_guard(
-        &self, 
-        mut sched: crate::allocator::InterruptSafeGuard<'_, crate::process::Scheduler>
-    ) {
+    pub fn wake_all(&self, sched: &mut crate::process::Scheduler) {
         let mut state = self.state.lock();
 
-        let current_id = sched.current_task.expect("FATAL: No current task!");
-        {
-            let current_task = sched.tasks.get_mut(current_id).unwrap();
-            current_task.state = crate::process::ThreadState::Blocked;
-            current_task.next_waiter = None
-        }
-
-        if let Some(tail_id) = state.tail {
-            let tail_task = sched.tasks.get_mut(tail_id).unwrap();
-            tail_task.next_waiter = Some(current_id);
-            state.tail = Some(current_id);
-        } else {
-            state.head = Some(current_id);
-            state.tail = Some(current_id);
-        }
-
-        drop(sched);
-        drop(state);
-        // crate::serial_print!("Going to sleep\n");
-
-        unsafe {
-            core::arch::asm!("int 0x20");
-        }
-    }
-
-    pub fn wake_all(&self ,sched: &mut crate::process::Scheduler) {
-        let mut state = self.state.lock();
-
-        while let Some(head_id) = state.head {
-            let next_waiter = {
-                let head_task = sched.tasks.get_mut(head_id).unwrap();
-                head_task.next_waiter
-            };
-
-            state.head = next_waiter;
-
-            if state.head.is_none() {
-                state.tail = None;
-            }
-
+        while let Some(head_id) = state.waiters.pop_front() {
             sched.wake_task(head_id);
         }
     }
 
     pub fn wake_one(&self) -> Option<usize> {
-        let mut sched = crate::process::SCHEDULER.lock();
-        let mut state = self.state.lock();
-
-        if let Some(head_id) = state.head {
-            let next_waiter = {
-                let head_task = sched.tasks.get_mut(head_id).unwrap();
-                head_task.next_waiter
+        x86_64::instructions::interrupts::without_interrupts(|| {
+            let head_id = {
+                let mut state = self.state.lock();
+                state.waiters.pop_front()
             };
 
-            state.head = next_waiter;
-
-            if state.head.is_none() {
-                state.tail = None;
+            if let Some(id) = head_id {
+                let mut sched = crate::process::SCHEDULER.lock();
+                sched.wake_task(id);
             }
 
-            sched.wake_task(head_id);
-            return Some(head_id);
-        } else {
-            None
-        }
+            head_id
+        })
     }
 }
 
@@ -119,26 +62,40 @@ impl<T> Mutex<T> {
 
     pub fn lock(&self) -> MutexGuard<'_, T> {
         loop {
-            let acquired = x86_64::instructions::interrupts::without_interrupts(|| {
-                if self
-                    .is_locked
-                    .compare_exchange(
-                        false,
-                        true,
-                        core::sync::atomic::Ordering::Acquire,
-                        core::sync::atomic::Ordering::Relaxed,
-                    )
-                    .is_ok()
-                {
-                    return true;
-                } else {
-                    self.wait_queue.wait();
-                }
-                false
-            });
+            x86_64::instructions::interrupts::disable();
 
-            if acquired {
-                return MutexGuard { mutex: self }; // Return from the actual function
+            let mut state = self.wait_queue.state.lock();
+
+            if self
+                .is_locked
+                .compare_exchange(
+                    false,
+                    true,
+                    core::sync::atomic::Ordering::Acquire,
+                    core::sync::atomic::Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                // We got the lock!
+                drop(state);
+                x86_64::instructions::interrupts::enable();
+                return MutexGuard { mutex: self };
+            } else {
+                let mut sched = crate::process::SCHEDULER.lock();
+
+                let current_id = sched.current_task.expect("FATAL: No current task!");
+                sched.tasks.get_mut(current_id).unwrap().state =
+                    crate::process::ThreadState::Blocked;
+
+                state.waiters.push_back(current_id);
+
+                drop(state);
+                drop(sched);
+
+                x86_64::instructions::interrupts::enable();
+                unsafe {
+                    core::arch::asm!("int 0x20");
+                }
             }
         }
     }
@@ -186,29 +143,40 @@ impl Semaphore {
 
     pub fn acquire(&self) {
         loop {
-            let acquired = x86_64::instructions::interrupts::without_interrupts(|| {
-                let count = self.count.load(core::sync::atomic::Ordering::Relaxed);
-                if count > 0 {
-                    if self
-                        .count
-                        .compare_exchange_weak(
-                            count,
-                            count - 1,
-                            core::sync::atomic::Ordering::Acquire,
-                            core::sync::atomic::Ordering::Relaxed,
-                        )
-                        .is_ok()
-                    {
-                        return true;
-                    }
-                } else {
-                    self.wait_queue.wait();
-                }
-                false
-            });
+            x86_64::instructions::interrupts::disable();
+            let mut state = self.wait_queue.state.lock();
 
-            if acquired {
-                return; // Return from the actual function
+            let count = self.count.load(core::sync::atomic::Ordering::Relaxed);
+
+            if count > 0 {
+                if self
+                    .count
+                    .compare_exchange_weak(
+                        count,
+                        count - 1,
+                        core::sync::atomic::Ordering::Acquire,
+                        core::sync::atomic::Ordering::Relaxed,
+                    )
+                    .is_ok()
+                {
+                    drop(state);
+                    x86_64::instructions::interrupts::enable();
+                    return;
+                }
+            } else {
+                // Count is 0. We failed to acquire. Go to sleep.
+                let mut sched = crate::process::SCHEDULER.lock();
+                let current_id = sched.current_task.expect("FATAL: No current task!");
+
+                sched.tasks.get_mut(current_id).unwrap().state =
+                    crate::process::ThreadState::Blocked;
+                state.waiters.push_back(current_id);
+                drop(state);
+                drop(sched);
+                x86_64::instructions::interrupts::enable();
+                unsafe {
+                    core::arch::asm!("int 0x20");
+                }
             }
         }
     }

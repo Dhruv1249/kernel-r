@@ -522,18 +522,39 @@ pub fn spawn(entry_point: extern "C" fn(), weight: u64) -> usize {
 
 pub fn join(target_tid: usize) {
     let mut sched = SCHEDULER.lock();
-    if let Some(target_thread) = sched.tasks.get_mut(target_tid) {
-        if target_thread.state == ThreadState::Zombie {
+
+    let current_id = sched.current_task.expect("FATAL: No current task!");
+    if current_id == target_tid {
+        return; // Deadlock prevention: you cannot join yourself.
+    }
+
+    let queue_ptr: *const crate::sync::WaitQueue = {
+        if let Some(target_thread) = sched.tasks.get_mut(target_tid) {
+            if target_thread.state == ThreadState::Zombie {
+                return;
+            }
+
+            &target_thread.join_queue as *const _
+        } else {
             return;
         }
+    };
 
-        let queue_ptr: *const crate::sync::WaitQueue = &target_thread.join_queue as *const _;
+    x86_64::instructions::interrupts::disable();
 
-        unsafe {
-            (*queue_ptr).wait_with_guard(sched);
-        }
-    } else {
-        return;
+    let current_task = sched.tasks.get_mut(current_id).unwrap();
+    current_task.state = crate::process::ThreadState::Blocked;
+
+    unsafe {
+        let mut state = (*queue_ptr).state.lock();
+        state.waiters.push_back(current_id);
+        drop(state);
+    }
+
+    drop(sched);
+    x86_64::instructions::interrupts::enable();
+    unsafe {
+        core::arch::asm!("int 0x20");
     }
 }
 
@@ -616,15 +637,18 @@ pub extern "C" fn task_a() {
     loop {
         crate::serial_println!("Thread A going to sleep waiting for keypress...");
 
-        let (code, stack) = crate::paging::setup_user_sandbox();
-        unsafe { crate::gdt::jump_to_user_space(code, stack); }
+        // let (code, stack) = crate::paging::setup_user_sandbox();
+        // unsafe { crate::gdt::jump_to_user_space(code, stack); }
 
-        // if let Some(key) = crate::keyboard::KEYBOARD_MAILBOX.receive() {
-        //     match key {
-        //         pc_keyboard::DecodedKey::Unicode(character) => crate::print!("{}", character),
-        //         pc_keyboard::DecodedKey::RawKey(_key) => continue,
-        //     }
-        // }
+        if let Some(key) = crate::keyboard::KEYBOARD_MAILBOX.receive() {
+            match key {
+                pc_keyboard::DecodedKey::Unicode(character) => {
+                    crate::print!("{}", character);
+                    crate::serial_print!("{}", character);
+                }
+                pc_keyboard::DecodedKey::RawKey(_key) => continue,
+            }
+        }
     }
 }
 

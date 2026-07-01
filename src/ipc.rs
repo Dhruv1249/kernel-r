@@ -2,7 +2,7 @@
 
 pub struct Mailbox<T> {
     // We use a Mutex to protect the inner queue from concurrent access.
-    queue: crate::sync::Mutex<alloc::collections::VecDeque<T>>,
+    queue: crate::allocator::Locked<alloc::collections::VecDeque<T>>,
     
     // We use a Semaphore to count available items and block tasks when empty.
     available: crate::sync::Semaphore,
@@ -12,7 +12,7 @@ impl<T> Mailbox<T> {
     pub const fn new() -> Self {
         // Initialization
         Self {
-            queue: crate::sync::Mutex::new(alloc::collections::VecDeque::new()),
+            queue: crate::allocator::Locked::new(alloc::collections::VecDeque::new()),
             available: crate::sync::Semaphore::new(0),
         }
     }
