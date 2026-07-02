@@ -43,6 +43,7 @@ mod qemu;
 mod queue;
 mod serial;
 mod slab;
+mod syscall;
 mod sync;
 mod vga_buffer;
 use core::panic::PanicInfo;

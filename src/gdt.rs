@@ -29,6 +29,7 @@ struct AlignedTss(TaskStateSegment);
 struct Gdt {
     table: GlobalDescriptorTable,
     code_selector: SegmentSelector,
+    data_selector: SegmentSelector,
     tss_selector: SegmentSelector,
     user_data: SegmentSelector,
     user_code: SegmentSelector,
@@ -39,6 +40,14 @@ static GDT_ONCE: Once<Gdt> = Once::new();
 
 pub fn user_data_selector() -> SegmentSelector {
     GDT_ONCE.r#try().expect("GDT not initialized").user_data
+}
+
+pub fn kernel_code_selector() -> SegmentSelector {
+    GDT_ONCE.r#try().expect("GDT not initialized").code_selector
+}
+
+pub fn kernel_data_selector() -> SegmentSelector {
+    GDT_ONCE.r#try().expect("GDT not initialized").data_selector
 }
 
 pub fn user_code_selector() -> SegmentSelector {
@@ -67,12 +76,16 @@ pub fn init() {
     let gdt = GDT_ONCE.call_once(|| {
         let mut table = GlobalDescriptorTable::new();
         let code_selector = table.add_entry(Descriptor::kernel_code_segment());
-        let tss_selector = table.add_entry(Descriptor::tss_segment(&tss.0));
+        let data_selector = table.add_entry(Descriptor::kernel_data_segment());
+        let _ = table.add_entry(Descriptor::user_code_segment());
         let user_data = table.add_entry(Descriptor::user_data_segment());
         let user_code = table.add_entry(Descriptor::user_code_segment());
+        let tss_selector = table.add_entry(Descriptor::tss_segment(&tss.0));
+
         Gdt {
             table,
             code_selector,
+            data_selector,
             tss_selector,
             user_data,
             user_code,
@@ -82,6 +95,9 @@ pub fn init() {
     gdt.table.load();
     unsafe {
         CS::set_reg(gdt.code_selector);
+        x86_64::instructions::segmentation::DS::set_reg(gdt.data_selector);
+        x86_64::instructions::segmentation::ES::set_reg(gdt.data_selector);
+        x86_64::instructions::segmentation::SS::set_reg(gdt.data_selector);
         load_tss(gdt.tss_selector);
     }
     serial_println!("GDT init complete");

@@ -2,10 +2,11 @@
 
 #[repr(C)]
 pub struct PerCpu {
-    pub cpu_id: u32,
-    pub apic_id: u32,
-    pub kernel_rsp: u64, // Used later to restore the kernel stack during a syscall
-    pub current_task_ptr: *mut crate::process::Thread,
+    pub cpu_id: u32,          // Offset 0
+    pub apic_id: u32,         // Offset 4
+    pub kernel_rsp: u64,      // Offset 8  <-- We will load this into RSP
+    pub user_rsp_scratch: u64,// Offset 16 <-- We will save the user's RSP here
+    pub current_task_ptr: *mut crate::process::Thread // Offset 24
 }
 
 // Since we only have 1 core, we statically allocate CPU 0's data block.
@@ -13,6 +14,7 @@ pub static mut PER_CPU_0: PerCpu = PerCpu {
     cpu_id: 0,
     apic_id: 0,
     kernel_rsp: 0,
+    user_rsp_scratch: 0,
     current_task_ptr: core::ptr::null_mut(),
 };
 
