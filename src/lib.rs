@@ -28,12 +28,13 @@ extern crate alloc;
 // Our imports here.
 mod allocator;
 mod apic;
+mod cpu;
 mod boot_info;
-mod ipc;
 mod buddy;
 mod gdt;
 mod interrupt;
 mod io_apic;
+mod ipc;
 mod keyboard;
 mod memory;
 mod paging;
@@ -440,6 +441,8 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
 
     crate::serial_println!("Heap initialized");
 
+    crate::cpu::init_cpu_local();
+
     // crate::vga_buffer::WRITER.lock().clear();
 
     let mut test_string = alloc::string::String::new();
@@ -465,19 +468,11 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
         1024,
     );
 
-    let test_t = crate::process::Thread::new(&mut sched, mortal_task as *const () as u64, 1024);
-
-    // Weight 1024 for standard priority
-    let t1 =
-        crate::process::Thread::new(&mut sched, crate::process::task_a as *const () as u64, 1024);
-    let t2 =
-        crate::process::Thread::new(&mut sched, crate::process::task_b as *const () as u64, 1024);
-
     sched.set_idle_task(idle_task);
-    sched.add_task(test_t);
-    sched.add_task(t1);
-    sched.add_task(t2);
-    drop(sched); // CRITICAL: Unlock before enabling interrupts!
+    drop(sched);
+
+    crate::process::spawn(crate::process::task_a, 1024);
+    crate::process::spawn(crate::process::task_b, 1024);
 
     // Disable the legacy PIC
     // Since its hardware timer is mapped to IRQ 0, which is mapped to Vector 8
