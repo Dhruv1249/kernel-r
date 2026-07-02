@@ -69,12 +69,12 @@ fn dump_registers() {
 // Again without std, we will have to define a panic handler otherwise it won't compile.
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    #[cfg(feature = "test")]
-    {
-        serial_println!("Test panicked");
-        serial_println!("{}", info);
-        // exit_qemu(crate::qemu::QemuExitCode::Failure);
-    }
+    // #[cfg(feature = "test")]
+    // {
+    //     serial_println!("Test panicked");
+    //     serial_println!("{}", info);
+    //     // exit_qemu(crate::qemu::QemuExitCode::Failure);
+    // }
 
     serial_println!("Kernel Panicked!");
     serial_println!("{}", info);
@@ -82,7 +82,7 @@ fn panic(info: &PanicInfo) -> ! {
     println!("{}", info);
     dump_registers();
     loop {
-        x86_64::instructions::hlt(); // Puts the CPU to sleep until the next interrupt (which won't matter here)
+        x86_64::instructions::hlt(); // Puts the CPU to sleep until the next interrupt 
     }
 }
 
@@ -491,7 +491,7 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
     // Set the CPU's Interrupt Flag (sti) so it actually listens to the APIC
     x86_64::instructions::interrupts::enable();
 
-    // NEW: Unmask the keyboard!
+    // Unmask the keyboard!
     unsafe {
         crate::io_apic::IO_APIC
             .lock()
@@ -517,35 +517,5 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
     //     }
     // }
 
-    // stack_overflow();
-    // #[cfg(feature = "test")]
-    // test_main();
-
-    // loop{}
 }
-// A simple function for our new task to execute
-// extern "C" fn example_task() {
-//     crate::serial_println!("HELLO FROM TASK B! The context switch was successful!");
-//     loop {
-//         x86_64::instructions::hlt();
-//     }
-// }
 
-// fn stack_overflow() {
-//     stack_overflow();
-// }
-//
-// fn testing() {
-//     assert_eq!(1, 1);
-//     serial_println!("testing... ok");
-// }
-//
-// #[cfg(feature = "test")]
-// pub fn test_main() {
-//     serial_println!("Running tests...");
-//     test_runner(&[( "testing",&testing )]);
-// }
-//
-extern "C" fn mortal_task() {
-    crate::serial_println!("I am a mortal thread. I will now return normally.");
-}
