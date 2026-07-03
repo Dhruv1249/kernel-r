@@ -1,5 +1,16 @@
-// src/process.rs
+// src/process/process.rs
 
+/// The full CPU register state saved and restored on every context switch.
+///
+/// The struct is `#[repr(C)]` so its layout is dictated by the C ABI, making it
+/// safe to access from the assembly timer ISR stub (`timer_isr`) which pushes
+/// registers in this exact order before calling `rust_timer_handler`.
+///
+/// The ordering matches the push sequence in `timer_isr`:
+/// hardware automatically pushes `ss, rsp, rflags, cs, rip` first, then the
+/// ISR stub pushes a dummy error code followed by all general-purpose registers
+/// (`rax` through `r15`).  This means `r15` is at the lowest address and `ss`
+/// at the highest.
 #[derive(Debug, Default, Clone, Copy)]
 #[repr(C)] // CRITICAL: Must be C-representation so our Assembly can read it reliably
 pub struct ThreadContext {
@@ -29,6 +40,14 @@ pub struct ThreadContext {
     pub ss: u64,
 }
 
+/// The lifecycle state of a kernel thread.
+///
+/// Transitions:
+/// - `Ready` → `Running`: the scheduler picks the thread.
+/// - `Running` → `Ready`: the timer ISR preempts the thread.
+/// - `Running` → `Sleeping`: the thread voluntarily waits (e.g., for a key).
+/// - `Running` → `Blocked`: the thread is waiting to acquire a [`crate::sync::sync::Mutex`].
+/// - Any → `Zombie`: the thread has called `exit_thread` and is awaiting cleanup.
 #[derive(Debug, PartialEq, Eq)]
 pub enum ThreadState {
     Running,
@@ -38,11 +57,28 @@ pub enum ThreadState {
     Zombie,
 }
 
+/// A kernel process — a container for a page table (address space).
+///
+/// Currently each process holds exactly one page table (CR3 value).  Threads
+/// are associated with a process via their `pid` field.  On a context switch
+/// between threads belonging to different processes the scheduler reloads CR3.
 pub struct Process {
     pub pid: u64,
     pub page_table: u64,
 }
 
+/// A kernel thread — the schedulable unit of execution.
+///
+/// Each `Thread` owns:
+/// - A kernel stack (`stack: Vec<u8>`) allocated from the heap.
+/// - A saved stack pointer (`stack_pointer`) pointing to the top of its saved
+///   [`ThreadContext`] on that stack.
+/// - EEVDF scheduling metadata: `weight`, `real_runtime`, `vruntime`, `lag`,
+///   `time_slice`, and `deadline`.
+/// - A BORE burst score for penalising CPU-hungry threads.
+/// - A raw pointer to its [`SchedNode`] in the red-black scheduler tree.
+/// - A [`crate::sync::sync::WaitQueue`] (`join_queue`) for threads waiting on
+///   this thread to exit.
 pub struct Thread {
     pub tid: u64,
     pub pid: u64,
@@ -66,14 +102,21 @@ pub struct Thread {
     pub rb_node: *mut SchedNode,
     pub next_waiter: Option<usize>,
 
-    pub join_queue: crate::sync::WaitQueue,
+    pub join_queue: crate::sync::sync::WaitQueue,
 }
 
+/// A slot in the [`ThreadArena`] that is either occupied by a live thread or
+/// linked into the arena's free list.
 pub enum ThreadSlot {
     Empty { next_free: Option<usize> },
     Occupied(Thread),
 }
 
+/// A slab-style arena for kernel threads with O(1) insert, remove, and lookup.
+///
+/// Backed by a `Vec<ThreadSlot>`, the arena reuses dead thread slots via a
+/// free list embedded in the `Empty` variant, so slot indices (thread IDs)
+/// remain stable across insertions and removals — no shifting or re-indexing.
 pub struct ThreadArena {
     slots: alloc::vec::Vec<ThreadSlot>,
     free_head: Option<usize>,
@@ -147,13 +190,19 @@ impl ThreadArena {
     }
 }
 
+/// Marks the current thread as a zombie, wakes all threads joining it, and yields.
+///
+/// Called when a thread function returns (via the trampoline `exit_thread`
+/// pointer written at the bottom of every thread stack).  After marking the
+/// state `Zombie`, it wakes all threads sleeping in the thread's `join_queue`,
+/// drops the scheduler lock, and triggers a context switch via `int 0x20`.
 pub fn exit_thread() -> ! {
     let mut sched = SCHEDULER.lock();
     let tid = sched
         .current_task
         .expect("FATAL: Phantome thread called exit");
     sched.tasks.get_mut(tid).unwrap().state = ThreadState::Zombie;
-    let queue_ptr: *const crate::sync::WaitQueue = {
+    let queue_ptr: *const crate::sync::sync::WaitQueue = {
         let task = sched.tasks.get_mut(tid).unwrap();
         &task.join_queue as *const _
     };
@@ -174,6 +223,14 @@ pub fn exit_thread() -> ! {
     }
 }
 
+/// The idle task — runs when no runnable thread exists.
+///
+/// Issues `hlt` in a loop, putting the CPU into a low-power halted state
+/// until the next interrupt.  The scheduler resumes a real thread as soon as
+/// one becomes runnable.
+///
+/// # Safety
+/// Declared `extern "C"` so it can be used as a raw function pointer.
 pub unsafe extern "C" fn idle_task() {
     loop {
         unsafe {
@@ -182,6 +239,12 @@ pub unsafe extern "C" fn idle_task() {
     }
 }
 
+/// The global EEVDF + BORE scheduler instance.
+///
+/// All scheduling operations (task insertion, context-switch decisions, task
+/// wakeups) are performed through this singleton.  It is protected by
+/// [`crate::mm::allocator::Locked`] so that both normal kernel code and the
+/// timer ISR can safely access it with interrupt-safe locking.
 pub struct Scheduler {
     pub processes: alloc::vec::Vec<Option<Process>>,
     pub tasks: ThreadArena,
@@ -192,8 +255,8 @@ pub struct Scheduler {
     pub idle_task_id: Option<usize>,
 }
 
-pub static SCHEDULER: crate::allocator::Locked<Scheduler> =
-    crate::allocator::Locked::new(Scheduler::new());
+pub static SCHEDULER: crate::mm::allocator::Locked<Scheduler> =
+    crate::mm::allocator::Locked::new(Scheduler::new());
 unsafe impl Send for Scheduler {}
 impl Scheduler {
     pub const fn new() -> Self {
@@ -300,7 +363,7 @@ impl Scheduler {
                 self.current_task = Some(idle_task_id);
                 let task = self.tasks.get_mut(idle_task_id).unwrap();
                 unsafe {
-                    crate::cpu::PER_CPU_0.kernel_rsp = task.stack.as_ptr() as u64 + task.stack.len() as u64;
+                    crate::arch::x86_64::cpu::PER_CPU_0.kernel_rsp = task.stack.as_ptr() as u64 + task.stack.len() as u64;
                 }
                 return task.stack_pointer as *mut ThreadContext;
             } else {
@@ -343,7 +406,7 @@ impl Scheduler {
         // Fetch the hardware context from our Rust ThreadArena
         if let Some(task) = self.tasks.get_mut(winner_idx) {
             unsafe {
-                crate::cpu::PER_CPU_0.kernel_rsp = task.stack.as_ptr() as u64 + task.stack.len() as u64;
+                crate::arch::x86_64::cpu::PER_CPU_0.kernel_rsp = task.stack.as_ptr() as u64 + task.stack.len() as u64;
             }
             
             return task.stack_pointer as *mut ThreadContext;
@@ -406,7 +469,7 @@ impl Thread {
         unsafe {
             core::ptr::write(
                 return_addr_ptr as *mut u64,
-                crate::process::exit_thread as *const () as u64,
+                crate::process::process::exit_thread as *const () as u64,
             );
         }
 
@@ -461,7 +524,7 @@ impl Thread {
             burst_score: 0,
             rb_node: core::ptr::null_mut(),
             next_waiter: None,
-            join_queue: crate::sync::WaitQueue::new(),
+            join_queue: crate::sync::sync::WaitQueue::new(),
         }
     }
 
@@ -493,14 +556,24 @@ pub fn update_system_uptime() {
     SYSTEM_UPTIME_NANOS.fetch_add(1_000_000, core::sync::atomic::Ordering::Relaxed);
 }
 
+/// Timer interrupt callback — updates the system clock and triggers a context switch.
+///
+/// Called from the `timer_isr` assembly stub (which saved the full
+/// [`ThreadContext`]) with `context` pointing at the saved register state on
+/// the current thread's kernel stack.  Returns a pointer to the `ThreadContext`
+/// of the next thread to run; the assembly stub restores that context and
+/// executes `iretq`.
+///
+/// # `#[unsafe(no_mangle)]`
+/// Required so the assembly stub can call this Rust function by name.
 #[unsafe(no_mangle)]
 pub extern "C" fn rust_timer_handler(
-    context: &mut crate::process::ThreadContext,
+    context: &mut crate::process::process::ThreadContext,
 ) -> *mut ThreadContext {
     // Update the system uptime
     update_system_uptime();
     // Tell the APIC we received the interrupt
-    crate::apic::LOCAL_APIC
+    crate::interrupts::apic::LOCAL_APIC
         .lock()
         .as_ref()
         .unwrap()
@@ -513,6 +586,11 @@ pub extern "C" fn rust_timer_handler(
     return next_context;
 }
 
+/// Immediately yields the CPU to the scheduler by triggering the timer interrupt vector.
+///
+/// Issues `int 0x20` (the APIC timer vector) directly.  The timer ISR then
+/// calls `rust_timer_handler`, which runs the EEVDF scheduler and switches to
+/// whichever thread has the earliest virtual deadline.
 // achieves the exact same context switch instantly!
 pub fn yield_now() {
     unsafe {
@@ -520,6 +598,10 @@ pub fn yield_now() {
     }
 }
 
+/// Spawns a new kernel thread at `entry_point` with the given scheduling `weight`.
+///
+/// Allocates a [`Thread`] (including its kernel stack), adds it to the global
+/// [`SCHEDULER`]'s red-black tree, and returns the new thread ID.
 // Spawns a new thread and returns its ID
 pub fn spawn(entry_point: extern "C" fn(), weight: u64) -> usize {
     let mut sched = SCHEDULER.lock();
@@ -527,6 +609,15 @@ pub fn spawn(entry_point: extern "C" fn(), weight: u64) -> usize {
     sched.add_task(thread)
 }
 
+/// Blocks the current thread until thread `target_tid` exits.
+///
+/// Adds the current thread's TID to `target`'s `join_queue`, marks the
+/// current thread as `Blocked`, drops all locks, and yields.  When the target
+/// thread calls `exit_thread`, it calls `wake_all` on its `join_queue`,
+/// which moves all joined threads back to `Ready`.
+///
+/// Returns immediately if `target_tid` is already `Zombie` or if the caller
+/// tries to join itself (deadlock prevention).
 pub fn join(target_tid: usize) {
     let mut sched = SCHEDULER.lock();
 
@@ -535,7 +626,7 @@ pub fn join(target_tid: usize) {
         return; // Deadlock prevention: you cannot join yourself.
     }
 
-    let queue_ptr: *const crate::sync::WaitQueue = {
+    let queue_ptr: *const crate::sync::sync::WaitQueue = {
         if let Some(target_thread) = sched.tasks.get_mut(target_tid) {
             if target_thread.state == ThreadState::Zombie {
                 return;
@@ -550,7 +641,7 @@ pub fn join(target_tid: usize) {
     x86_64::instructions::interrupts::disable();
 
     let current_task = sched.tasks.get_mut(current_id).unwrap();
-    current_task.state = crate::process::ThreadState::Blocked;
+    current_task.state = crate::process::process::ThreadState::Blocked;
 
     unsafe {
         let mut state = (*queue_ptr).state.lock();
@@ -636,7 +727,7 @@ unsafe extern "C" {
 
 // Test tasks
 
-use crate::sync::Mutex;
+use crate::sync::sync::Mutex;
 
 pub static TEST_MUTEX: Mutex<usize> = Mutex::new(0);
 
@@ -644,10 +735,10 @@ pub extern "C" fn task_a() {
     loop {
         crate::serial_println!("Thread A going to sleep waiting for keypress...");
 
-        let (code, stack) = crate::paging::setup_user_sandbox();
-        unsafe { crate::gdt::jump_to_user_space(code, stack); }
+        let (code, stack) = crate::mm::paging::setup_user_sandbox();
+        unsafe { crate::arch::x86_64::gdt::jump_to_user_space(code, stack); }
 
-        // if let Some(key) = crate::keyboard::KEYBOARD_MAILBOX.receive() {
+        // if let Some(key) = crate::drivers::keyboard::KEYBOARD_MAILBOX.receive() {
         //     match key {
         //         pc_keyboard::DecodedKey::Unicode(character) => {
         //             crate::print!("{}", character);

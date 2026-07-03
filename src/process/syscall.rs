@@ -4,6 +4,22 @@ unsafe extern "C" {
     fn syscall_entry_stub();
 }
 
+/// Configures the SYSCALL/SYSRET MSRs and enables the SYSCALL instruction.
+///
+/// # MSR configuration
+///
+/// | MSR | Purpose | Value written |
+/// |-----|---------|---------------|
+/// | `EFER` | Enable SYSCALL/SYSRET | Set `SYSTEM_CALL_EXTENSIONS` bit |
+/// | `STAR` | Selector routing | Kernel CS = Ring0 code sel, User CS = Ring3 code sel |
+/// | `LSTAR` | 64-bit SYSCALL entry point | `syscall_entry` (assembly stub) |
+/// | `SFMASK` | RFLAGS bits to clear on SYSCALL | `0x200` (interrupt flag) |
+///
+/// After `init`, any `syscall` instruction executed in Ring 3 will:
+/// 1. Disable interrupts (RFLAGS.IF cleared via SFMASK).
+/// 2. Save user `RIP` in `RCX` and user `RFLAGS` in `R11`.
+/// 3. Jump to `syscall_entry` in kernel mode.
+/// 4. Switch stacks using the per-CPU `GS`-relative `kernel_rsp` field.
 pub fn init() {
     unsafe {
         x86_64::registers::model_specific::Efer::write(
@@ -12,10 +28,10 @@ pub fn init() {
         );
     }
 
-    let kernel_code = crate::gdt::kernel_code_selector();
-    let kernel_data = crate::gdt::kernel_data_selector();
-    let user_data = crate::gdt::user_data_selector();
-    let user_code = crate::gdt::user_code_selector();
+    let kernel_code = crate::arch::x86_64::gdt::kernel_code_selector();
+    let kernel_data = crate::arch::x86_64::gdt::kernel_data_selector();
+    let user_data = crate::arch::x86_64::gdt::user_data_selector();
+    let user_code = crate::arch::x86_64::gdt::user_code_selector();
 
     // The hardware math subtracts 8 from the user data selector to find the 32-bit base.
 
@@ -112,8 +128,23 @@ core::arch::global_asm!(
     "sysretq",
 );
 
+/// The Rust-side syscall dispatch handler, called by the `syscall_entry` stub.
+///
+/// The `syscall_entry` assembly stub (defined below via `global_asm!`) saves
+/// the user-mode register state into a [`crate::process::process::ThreadContext`]
+/// on the kernel stack, then calls this function with a mutable reference to
+/// that context.  On return, `syscall_entry` restores the (possibly modified)
+/// context and executes `sysretq` back to user space.
+///
+/// # Dispatch table
+///
+/// | `context.rax` | Syscall | Action |
+/// |---------------|---------|--------|
+/// | `42` | `print` | Print `rdi`-length UTF-8 bytes at `rsi` to VGA + serial |
+/// | `60` | `exit` | Mark thread zombie and context-switch away |
+/// | _other_ | unknown | Log on serial and return |
 #[unsafe(no_mangle)]
-pub extern "C" fn rust_syscall_handler(context: &mut crate::process::ThreadContext) {
+pub extern "C" fn rust_syscall_handler(context: &mut crate::process::process::ThreadContext) {
     let syscall_no = context.rax;
 
     match syscall_no {
@@ -146,7 +177,7 @@ pub extern "C" fn rust_syscall_handler(context: &mut crate::process::ThreadConte
             let exit_code = context.rdi;
             crate::serial_println!("User thread exited with code: {}", exit_code);
             
-            crate::process::exit_thread();
+            crate::process::process::exit_thread();
         }
 
         // Unknown Syscall

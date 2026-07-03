@@ -1,11 +1,25 @@
-// src/buddy.rs
+// src/mm/buddy.rs
 
+/// A node in a buddy-allocator free list, stored in-place inside free memory.
+///
+/// When a physical memory block is free, its first bytes are reinterpreted as a
+/// `FreeBlock`.  The block forms part of a doubly-linked list so that
+/// removal (during allocation or merging) is O(1) regardless of list length.
+///
+/// # Invariants
+/// - `next` and `prev` are either null or aligned pointers to other `FreeBlock`s.
+/// - The memory backing the node must not be used for any other purpose while
+///   it is in a free list.
 pub struct FreeBlock {
     next: *mut FreeBlock,
     prev: *mut FreeBlock,
 }
 
 impl FreeBlock {
+    /// Returns a sentinel `FreeBlock` with both pointers set to null.
+    ///
+    /// Used to initialise the placeholder elements at the head of each free
+    /// list before any memory has been added.
     // A clean way to initialize an empty block
     pub const fn empty() -> Self {
         FreeBlock {
@@ -15,8 +29,38 @@ impl FreeBlock {
     }
 }
 
+/// The number of distinct block-size classes tracked by the buddy allocator.
+///
+/// Order 0 = 4 KiB (1 page), Order 1 = 8 KiB, …, Order 10 = 4 MiB.
+/// Eleven orders covers the entire practical range for kernel heap objects.
 const MAX_ORDER: usize = 11; // Order 0 to 10
 
+/// A binary-buddy physical frame allocator.
+///
+/// # Design
+///
+/// The buddy system partitions physical memory into power-of-two-sized blocks
+/// called *buddies*.  Each order `n` manages blocks of `4096 × 2ⁿ` bytes.
+/// When a block of order `n` is freed, the allocator checks whether its
+/// *buddy* (the adjacent, same-size block that together would form an
+/// order-`n+1` block) is also free.  If so, the two buddies are merged into
+/// one larger block and the process repeats recursively up to `MAX_ORDER - 1`.
+///
+/// # Bitmap
+/// A compact bitmap tracks which buddy pairs are split.  Each bit represents
+/// one pair of buddies at a given order: bit = 0 means both buddies have the
+/// same allocation state (both free or both allocated); bit = 1 means they
+/// differ.  Toggling the bit on alloc and free gives O(1) buddy-state lookup
+/// without any additional metadata per block.
+///
+/// # Free lists
+/// An array of `MAX_ORDER` singly-headed doubly-linked lists stores the free
+/// blocks at each order.  Blocks are stored in-place — the `FreeBlock` header
+/// is written into the first bytes of the free physical frame.
+///
+/// # Safety
+/// All pointer arithmetic is inherently unsafe.  The allocator is wrapped in
+/// `crate::mm::allocator::Locked<T>` to serialise access.
 pub struct BuddyAllocator {
     // Array of 11 linked lists. Index 0 is 4KB, Index 1 is 8KB, etc. upto 4MB
     free_list: [*mut FreeBlock; MAX_ORDER],
@@ -25,6 +69,17 @@ pub struct BuddyAllocator {
     base_addr: usize,
 }
 
+/// Converts a byte size to the minimum buddy order that can satisfy it.
+///
+/// The order is computed by ceiling-dividing `size_in_bytes` by 4096 (page
+/// size) to get a page count, then taking the next power-of-two's trailing
+/// zeros as the order.  The result is capped at order 10 (4 MiB) to stay
+/// within the allocator's `MAX_ORDER`.
+///
+/// # Examples
+/// - 4096 bytes → order 0 (1 page)
+/// - 8192 bytes → order 1 (2 pages)
+/// - 5000 bytes → order 1 (rounded up to 2 pages)
 pub fn size_to_order(size_in_bytes: usize) -> usize {
     // Add 4095 to ceiling the value, then bit-shift right by 12 to divide by 4096
     let pages = (size_in_bytes + 4095) >> 12;
@@ -36,6 +91,12 @@ pub fn size_to_order(size_in_bytes: usize) -> usize {
     core::cmp::min(order, 10)
 }
 
+/// Computes the number of bytes required for the buddy bitmap.
+///
+/// The bitmap needs one bit per buddy pair at order 0 (the finest granularity).
+/// Each buddy pair covers `2 × 4096 = 65536` bytes (2^16), so the number of
+/// bits equals `highest_physical_address >> 16`.  The result is rounded up to
+/// the nearest 4 KiB page so the bitmap itself can be allocated in whole pages.
 pub fn calculate_bitmap_size(highest_physical_address: usize) -> usize {
     // In this bitmap 1 bit = 1 buddy (2 frames)
     // Divide by 65,536 (2^16) to find how many bytes the bitmap needs
@@ -46,6 +107,16 @@ pub fn calculate_bitmap_size(highest_physical_address: usize) -> usize {
 
 impl BuddyAllocator {
 
+    /// Reinitialises an already-constructed allocator with a new bitmap and base address.
+    ///
+    /// This is the companion to [`BuddyAllocator::empty`]: after calling `empty`
+    /// to create a placeholder and storing it in a static, call `init` once the
+    /// bitmap memory is available to make the allocator operational.
+    ///
+    /// # Safety
+    /// - `bitmap_ptr` must point to `bitmap_size` bytes of zeroed, exclusively-owned memory.
+    /// - `base_addr` must equal the virtual offset added to all physical addresses
+    ///   before they are handed to this allocator (i.e. `PHYS_OFFSET`).
     pub unsafe fn init(&mut self, bitmap_ptr: *mut u8, bitmap_size: usize, base_addr: usize) {
         self.bitmap = bitmap_ptr;
         self.bitmap_size = bitmap_size;
@@ -53,6 +124,10 @@ impl BuddyAllocator {
         self.free_list = [core::ptr::null_mut(); MAX_ORDER];
     }
 
+    /// Creates a fully-initialised `BuddyAllocator` with the given bitmap.
+    ///
+    /// Prefer [`BuddyAllocator::empty`] + [`BuddyAllocator::init`] when the
+    /// allocator must live in a static (which requires a `const` constructor).
     pub fn new(bitmap_ptr: *mut u8, bitmap_size: usize, base_addr: usize) -> Self {
         BuddyAllocator {
             free_list: [core::ptr::null_mut(); MAX_ORDER],
@@ -62,6 +137,11 @@ impl BuddyAllocator {
         }
     }
 
+    /// Creates a placeholder `BuddyAllocator` that is safe to store in a static.
+    ///
+    /// All pointers are null and sizes are zero.  The allocator must be
+    /// initialised with [`BuddyAllocator::init`] before any allocation is
+    /// attempted, otherwise the first `alloc` call will return `None`.
     pub const fn empty() -> Self {
         BuddyAllocator {
             free_list: [core::ptr::null_mut(); MAX_ORDER],
@@ -71,6 +151,16 @@ impl BuddyAllocator {
         }
     }
 
+    /// Feeds a contiguous range of free physical addresses into the allocator.
+    ///
+    /// The range `[start_addr, end_addr)` is carved into the largest possible
+    /// naturally-aligned buddy blocks.  For each iteration the algorithm picks
+    /// the minimum of:
+    /// - the largest power-of-two order that fits in the remaining range, and
+    /// - the largest order that `start_addr`'s alignment can support.
+    ///
+    /// The chosen block is pushed onto the appropriate free list and its bitmap
+    /// bit is toggled to mark it as free, then `start_addr` is advanced past it.
     pub fn add_free_region(&mut self, mut start_addr: usize, end_addr: usize) {
         while start_addr < end_addr {
             let remaining_pages = (end_addr - start_addr) >> 12;
@@ -98,6 +188,15 @@ impl BuddyAllocator {
         }
     }
 
+    /// Allocates a block of the given `order` (i.e. `4096 × 2^order` bytes).
+    ///
+    /// # Strategy
+    /// 1. If the exact-order free list is non-empty, pop and return the head block.
+    /// 2. Otherwise, search upward through higher orders until a block is found.
+    /// 3. Split that block down to the requested order by repeatedly halving it,
+    ///    pushing the upper halves (buddies) onto their respective free lists.
+    ///
+    /// Returns `None` if no block large enough is available.
     pub fn alloc(&mut self, order: usize) -> Option<*mut FreeBlock> {
         // Clamp the order to the maximum order
         let order = core::cmp::min(order, MAX_ORDER - 1);
@@ -142,6 +241,20 @@ impl BuddyAllocator {
         None
     }
 
+    /// Toggles the bitmap bit for the buddy pair that contains `addr` at `order`.
+    ///
+    /// # Bitmap layout
+    /// The bitmap uses a geometric-series partition:
+    /// - Order 0 gets the first half of the bitmap bits.
+    /// - Order 1 gets the next quarter, etc.
+    ///
+    /// This is computed via a cumulative `offset` before adding the per-order
+    /// bit index.  After toggling, the function returns `true` if the bit is
+    /// now 0 (meaning both buddies are free — a merge is possible).
+    ///
+    /// # Panics
+    /// Panics if the computed byte index falls outside `bitmap_size`, which
+    /// indicates a serious memory-layout bug.
     pub fn toggle_bit(&mut self, order: usize, addr: usize) -> bool {
         let phys_addr = addr.saturating_sub(self.base_addr); 
         let mut bit_index = phys_addr >> (12 + order + 1);
@@ -169,6 +282,18 @@ impl BuddyAllocator {
         }
     }
 
+    /// Returns a previously-allocated block at `addr` of the given `order` to the free pool.
+    ///
+    /// # Merging (coalescing)
+    /// After marking the block as free, the allocator tries to merge it with its
+    /// buddy.  It does this by toggling the shared bitmap bit: if the result is 0
+    /// (both buddies now free) the buddy is removed from its free list and the
+    /// two are coalesced into a block of `order + 1`, then the process repeats.
+    /// If the bit is 1 (buddy still allocated) the loop stops and the block is
+    /// pushed onto the current-order free list.
+    ///
+    /// The XOR trick `addr ^ size` computes the buddy address because buddies
+    /// are always aligned to `2 × size` and differ only in bit `log2(size)`.
     pub fn free(&mut self, mut addr: usize, mut order: usize) {
         order = core::cmp::min(order, MAX_ORDER - 1);
 
@@ -192,6 +317,10 @@ impl BuddyAllocator {
         self.push_block(order, addr as *mut FreeBlock);
     }
 
+    /// Inserts `block` at the head of the order-`order` free list in O(1).
+    ///
+    /// Updates the old head's `prev` pointer to maintain the doubly-linked
+    /// list invariant.  The new block becomes the new head.
     pub fn push_block(&mut self, order: usize, block: *mut FreeBlock) {
         let head = self.free_list[order];
         unsafe {
@@ -206,6 +335,11 @@ impl BuddyAllocator {
         self.free_list[order] = block;
     }
 
+    /// Removes `block` from the middle (or head) of the order-`order` free list in O(1).
+    ///
+    /// Stitches `block->prev->next` and `block->next->prev` together, bypassing
+    /// the removed node.  If `block` is the list head, updates `free_list[order]`
+    /// directly.
     pub fn remove_block(&mut self, order: usize, block: *mut FreeBlock) {
         unsafe {
             if (*block).prev != core::ptr::null_mut() {

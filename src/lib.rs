@@ -15,7 +15,7 @@
 #![feature(custom_test_frameworks)]
 #![test_runner(crate::test_runner)]
 pub fn test_runner(tests: &[(&str, &dyn Fn())]) {
-    use qemu::QemuExitCode;
+    use drivers::qemu::QemuExitCode;
     println!("Running {} tests.........", tests.len());
     for test in tests {
         serial_println!("Running {}", test.0);
@@ -25,32 +25,19 @@ pub fn test_runner(tests: &[(&str, &dyn Fn())]) {
 }
 extern crate alloc;
 
-// Our imports here.
-mod allocator;
-mod apic;
-mod cpu;
-mod boot_info;
-mod buddy;
-mod gdt;
-mod interrupt;
-mod io_apic;
-mod ipc;
-mod keyboard;
-mod memory;
-mod paging;
-mod process;
-mod qemu;
-mod queue;
-mod serial;
-mod slab;
-mod syscall;
-mod sync;
-mod vga_buffer;
+// Our imports here — now organised into subsystem modules.
+pub mod arch;
+pub mod boot;
+pub mod mm;
+pub mod interrupts;
+pub mod process;
+pub mod sync;
+pub mod drivers;
 use core::panic::PanicInfo;
 
 use x86_64::structures::paging::Size4KiB;
 
-use crate::{boot_info::TagHeader, qemu::exit_qemu};
+use crate::{boot::boot_info::TagHeader, drivers::qemu::exit_qemu};
 
 fn dump_registers() {
     serial_println!("Dumping registers");
@@ -73,7 +60,7 @@ fn panic(info: &PanicInfo) -> ! {
     // {
     //     serial_println!("Test panicked");
     //     serial_println!("{}", info);
-    //     // exit_qemu(crate::qemu::QemuExitCode::Failure);
+    //     // exit_qemu(crate::drivers::qemu::QemuExitCode::Failure);
     // }
 
     serial_println!("Kernel Panicked!");
@@ -116,14 +103,14 @@ unsafe extern "C" {
 // stability.
 pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -> ! {
     // Load the GDT and the IDT
-    gdt::init();
-    interrupt::load_idt();
+    crate::arch::x86_64::gdt::init();
+    crate::interrupts::interrupt::load_idt();
 
     // Clear the screen
-    crate::vga_buffer::WRITER.lock().clear();
+    crate::drivers::vga_buffer::WRITER.lock().clear();
 
     // Phyiscal offset
-    let phy_offset = crate::paging::PHYS_OFFSET;
+    let phy_offset = crate::mm::paging::PHYS_OFFSET;
 
     let stack_var = 0u64;
     let stack_addr = &stack_var as *const _ as u64;
@@ -145,21 +132,21 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
     let mbi_ptr = multiboot_info_addr as *const u32;
     let mbi = unsafe { &*mbi_ptr };
 
-    crate::memory::reserve_region(0x0, 0x1000, "IVT / BIOS Data");
-    crate::memory::reserve_region(0xA0000, 0x100000, "VGA / Legacy Area");
+    crate::mm::memory::reserve_region(0x0, 0x1000, "IVT / BIOS Data");
+    crate::mm::memory::reserve_region(0xA0000, 0x100000, "VGA / Legacy Area");
 
-    crate::memory::reserve_region(0x100000, k_end, "Kernel Image + Boot Section");
+    crate::mm::memory::reserve_region(0x100000, k_end, "Kernel Image + Boot Section");
 
-    crate::memory::reserve_region(
+    crate::mm::memory::reserve_region(
         multiboot_info_addr,
         multiboot_info_addr + (*mbi as usize),
         "Multiboot Info",
     );
-    crate::memory::reserve_region(st_bottom - 4096, st_top, "Kernel Stack + Guard Page");
+    crate::mm::memory::reserve_region(st_bottom - 4096, st_top, "Kernel Stack + Guard Page");
 
     serial_println!("Multiboot size: {:?}", mbi);
 
-    let tag_iter = boot_info::TagIterator::new(multiboot_info_addr);
+    let tag_iter = crate::boot::boot_info::TagIterator::new(multiboot_info_addr);
     let mut tag_option: Option<*const TagHeader> = None;
 
     for tags in tag_iter {
@@ -172,7 +159,7 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
 
     let tag = tag_option.unwrap();
 
-    let mmap_entry = unsafe { &*(tag as *const boot_info::MemoryMapTag) };
+    let mmap_entry = unsafe { &*(tag as *const crate::boot::boot_info::MemoryMapTag) };
 
     // Assert that the memory map is valid
     assert!(mmap_entry.entry_size > 0);
@@ -182,43 +169,43 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
     let num_entries = (mmap_entry.size - 16) / mmap_entry.entry_size;
 
     // First entry starts exactly 16 bytes after the tag tag header
-    let first_entry_ptr = (tag as usize + 16) as *const boot_info::MemoryMapEntry;
+    let first_entry_ptr = (tag as usize + 16) as *const crate::boot::boot_info::MemoryMapEntry;
 
     let entries = unsafe { core::slice::from_raw_parts(first_entry_ptr, num_entries as usize) };
 
-    let mut allocator = crate::memory::BumpAllocator::init(k_end, entries);
+    let mut allocator = crate::mm::memory::BumpAllocator::init(k_end, entries);
 
     // Bootstrap the Buddy Allocator!
-    crate::memory::init_physical_memory(entries, &mut allocator);
+    crate::mm::memory::init_physical_memory(entries, &mut allocator);
 
     serial_print!(
         "Allocating frame1: {:#x?}\n",
-        crate::memory::allocate_frame()
+        crate::mm::memory::allocate_frame()
     );
     serial_print!(
         "Allocating frame2: {:#x?}\n",
-        crate::memory::allocate_frame()
+        crate::mm::memory::allocate_frame()
     );
     serial_print!(
         "Allocating frame3: {:#x?}\n",
-        crate::memory::allocate_frame()
+        crate::mm::memory::allocate_frame()
     );
 
     // ---  FIND THE MADT PHYSICAL ADDRESS ---
     let mut madt_phys_addr: Option<u64> = None;
 
-    for tag in boot_info::TagIterator::new(multiboot_info_addr) {
+    for tag in crate::boot::boot_info::TagIterator::new(multiboot_info_addr) {
         let tag_header = unsafe { &*tag };
 
         // ACPI Old RSDP Version 1 (32-bit)
         if tag_header.typ == 14 {
             crate::serial_println!("ACPI 1.0 RSDP Found at {:#x}", tag as usize);
-            let rsdp = unsafe { &*(tag as *const boot_info::AcpiV1Tag) };
+            let rsdp = unsafe { &*(tag as *const crate::boot::boot_info::AcpiV1Tag) };
             let rsdt_addr =
                 unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(rsdp.rsdt_address)) };
             let rsdt_virt_addr =
-                x86_64::VirtAddr::new(rsdt_addr as u64 + crate::paging::PHYS_OFFSET);
-            let sdt_header = unsafe { &*(rsdt_virt_addr.as_ptr::<boot_info::SdtHeader>()) };
+                x86_64::VirtAddr::new(rsdt_addr as u64 + crate::mm::paging::PHYS_OFFSET);
+            let sdt_header = unsafe { &*(rsdt_virt_addr.as_ptr::<crate::boot::boot_info::SdtHeader>()) };
 
             if unsafe {
                 !crate::validate_checksum(
@@ -230,16 +217,16 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
             }
 
             let num_entries =
-                (sdt_header.length as usize - core::mem::size_of::<boot_info::SdtHeader>()) / 4;
+                (sdt_header.length as usize - core::mem::size_of::<crate::boot::boot_info::SdtHeader>()) / 4;
             let start_ptr = (rsdt_virt_addr.as_u64()
-                + core::mem::size_of::<boot_info::SdtHeader>() as u64)
+                + core::mem::size_of::<crate::boot::boot_info::SdtHeader>() as u64)
                 as *const u32;
 
             for i in 0..num_entries {
                 let entry = unsafe { core::ptr::read_unaligned(start_ptr.add(i)) };
                 let entry_virt_addr =
-                    x86_64::VirtAddr::new(entry as u64 + crate::paging::PHYS_OFFSET);
-                let entry_header = unsafe { &*(entry_virt_addr.as_ptr::<boot_info::SdtHeader>()) };
+                    x86_64::VirtAddr::new(entry as u64 + crate::mm::paging::PHYS_OFFSET);
+                let entry_header = unsafe { &*(entry_virt_addr.as_ptr::<crate::boot::boot_info::SdtHeader>()) };
                 let sdt_signature = unsafe {
                     core::ptr::read_unaligned(core::ptr::addr_of!(entry_header.signature))
                 };
@@ -253,12 +240,12 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
         // ACPI New RSDP Version 2 (64-bit)
         else if tag_header.typ == 15 {
             crate::serial_println!("ACPI 2.0 RSDP Found at {:#x}", tag as usize);
-            let rsdpv2 = unsafe { &*(tag as *const boot_info::AcpiV2Tag) };
+            let rsdpv2 = unsafe { &*(tag as *const crate::boot::boot_info::AcpiV2Tag) };
             let xsdt_addr =
                 unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(rsdpv2.xsdt_address)) };
             let xsdt_virt_addr =
-                x86_64::VirtAddr::new(xsdt_addr as u64 + crate::paging::PHYS_OFFSET);
-            let sdt_header = unsafe { &*(xsdt_virt_addr.as_ptr::<boot_info::SdtHeader>()) };
+                x86_64::VirtAddr::new(xsdt_addr as u64 + crate::mm::paging::PHYS_OFFSET);
+            let sdt_header = unsafe { &*(xsdt_virt_addr.as_ptr::<crate::boot::boot_info::SdtHeader>()) };
 
             if unsafe {
                 !crate::validate_checksum(
@@ -270,15 +257,15 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
             }
 
             let num_entries =
-                (sdt_header.length as usize - core::mem::size_of::<boot_info::SdtHeader>()) / 8;
+                (sdt_header.length as usize - core::mem::size_of::<crate::boot::boot_info::SdtHeader>()) / 8;
             let start_ptr = (xsdt_virt_addr.as_u64()
-                + core::mem::size_of::<boot_info::SdtHeader>() as u64)
+                + core::mem::size_of::<crate::boot::boot_info::SdtHeader>() as u64)
                 as *const u64;
 
             for i in 0..num_entries {
                 let entry = unsafe { core::ptr::read_unaligned(start_ptr.add(i)) };
-                let entry_virt_addr = x86_64::VirtAddr::new(entry + crate::paging::PHYS_OFFSET);
-                let entry_header = unsafe { &*(entry_virt_addr.as_ptr::<boot_info::SdtHeader>()) };
+                let entry_virt_addr = x86_64::VirtAddr::new(entry + crate::mm::paging::PHYS_OFFSET);
+                let entry_header = unsafe { &*(entry_virt_addr.as_ptr::<crate::boot::boot_info::SdtHeader>()) };
                 let sdt_signature = unsafe {
                     core::ptr::read_unaligned(core::ptr::addr_of!(entry_header.signature))
                 };
@@ -295,9 +282,9 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
     if let Some(madt_phys) = madt_phys_addr {
         crate::serial_println!("Found MADT (APIC) at physical address: {:#x}", madt_phys);
 
-        let madt_virt = x86_64::VirtAddr::new(madt_phys + crate::paging::PHYS_OFFSET);
-        let apic_header = unsafe { &*(madt_virt.as_ptr::<boot_info::Madt>()) };
-        let active_table = crate::paging::active_level_4_table();
+        let madt_virt = x86_64::VirtAddr::new(madt_phys + crate::mm::paging::PHYS_OFFSET);
+        let apic_header = unsafe { &*(madt_virt.as_ptr::<crate::boot::boot_info::Madt>()) };
+        let active_table = crate::mm::paging::active_level_4_table();
 
         // Standard MMIO Flags
         let mmio_flags = x86_64::structures::paging::PageTableFlags::PRESENT
@@ -312,9 +299,9 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
         crate::serial_println!("Local APIC Address: {:#x}", local_apic_addr);
 
         let lapic_phys = x86_64::PhysAddr::new(local_apic_addr as u64);
-        let lapic_virt = x86_64::VirtAddr::new(local_apic_addr as u64 + crate::paging::PHYS_OFFSET);
+        let lapic_virt = x86_64::VirtAddr::new(local_apic_addr as u64 + crate::mm::paging::PHYS_OFFSET);
 
-        crate::paging::map_to(
+        crate::mm::paging::map_to(
             x86_64::structures::paging::Page::<Size4KiB>::containing_address(lapic_virt),
             x86_64::structures::paging::PhysFrame::<Size4KiB>::containing_address(lapic_phys),
             mmio_flags,
@@ -322,22 +309,22 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
         )
         .expect("Failed to map Local APIC");
 
-        let local_apic = unsafe { crate::apic::LocalApic::new(lapic_virt) };
+        let local_apic = unsafe { crate::interrupts::apic::LocalApic::new(lapic_virt) };
         unsafe {
             local_apic.init();
         }
-        *crate::apic::LOCAL_APIC.lock() = Some(local_apic);
+        *crate::interrupts::apic::LOCAL_APIC.lock() = Some(local_apic);
 
         // --- I/O APIC ---
         let total_table_length =
             unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(apic_header.header.length)) }
                 as u64;
-        let mut current_offset = core::mem::size_of::<boot_info::Madt>() as u64;
+        let mut current_offset = core::mem::size_of::<crate::boot::boot_info::Madt>() as u64;
 
         while current_offset < total_table_length {
             let record_virt_addr = x86_64::VirtAddr::new(madt_virt.as_u64() + current_offset);
             let record_header =
-                unsafe { &*(record_virt_addr.as_ptr::<boot_info::MadtRecordHeader>()) };
+                unsafe { &*(record_virt_addr.as_ptr::<crate::boot::boot_info::MadtRecordHeader>()) };
 
             if record_header.record_length < 2 {
                 crate::serial_println!("Reached zero-padded region of MADT. Breaking loop.");
@@ -346,7 +333,7 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
 
             if record_header.entry_type == 1 {
                 let io_apic_record =
-                    unsafe { &*(record_virt_addr.as_ptr::<boot_info::IoApicRecord>()) };
+                    unsafe { &*(record_virt_addr.as_ptr::<crate::boot::boot_info::IoApicRecord>()) };
                 let io_apic_addr = unsafe {
                     core::ptr::read_unaligned(core::ptr::addr_of!(io_apic_record.io_apic_address))
                 };
@@ -354,9 +341,9 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
 
                 let io_apic_phys = x86_64::PhysAddr::new(io_apic_addr as u64);
                 let io_apic_virt =
-                    x86_64::VirtAddr::new(io_apic_addr as u64 + crate::paging::PHYS_OFFSET);
+                    x86_64::VirtAddr::new(io_apic_addr as u64 + crate::mm::paging::PHYS_OFFSET);
 
-                crate::paging::map_to(
+                crate::mm::paging::map_to(
                     x86_64::structures::paging::Page::<Size4KiB>::containing_address(io_apic_virt),
                     x86_64::structures::paging::PhysFrame::<Size4KiB>::containing_address(
                         io_apic_phys,
@@ -367,8 +354,8 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
                 .expect("Failed to map I/O APIC");
 
                 // IO APIC abstraction
-                let io_apic = unsafe { crate::io_apic::IoApic::new(io_apic_virt) };
-                *crate::io_apic::IO_APIC.lock() = Some(io_apic);
+                let io_apic = unsafe { crate::interrupts::io_apic::IoApic::new(io_apic_virt) };
+                *crate::interrupts::io_apic::IO_APIC.lock() = Some(io_apic);
 
                 break;
             }
@@ -378,7 +365,7 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
         panic!("FATAL: No MADT (APIC) found in ACPI tables!");
     }
 
-    let p4_table = paging::active_level_4_table();
+    let p4_table = crate::mm::paging::active_level_4_table();
 
     // Remove 0x0 identity mapping
 
@@ -398,7 +385,7 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
         x86_64::structures::paging::Page::containing_address(guard_page_addr);
 
     crate::serial_println!("Mapping guard page");
-    if let Some(_page) = crate::paging::unmap(guard_page, p4_table) {
+    if let Some(_page) = crate::mm::paging::unmap(guard_page, p4_table) {
         serial_println!("Successfully unmapped the guard page");
     } else {
         serial_println!("Failed to unmap the guard page");
@@ -410,14 +397,14 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
     let page = x86_64::structures::paging::Page::containing_address(virt_addr);
 
     //  Ask our bump allocator for a fresh physical frame to back it
-    let physical_frame_addr = crate::memory::allocate_frame().unwrap();
+    let physical_frame_addr = crate::mm::memory::allocate_frame().unwrap();
     let frame = x86_64::structures::paging::PhysFrame::containing_address(x86_64::PhysAddr::new(
         physical_frame_addr as u64,
     ));
 
     //  Map them together!
     use x86_64::structures::paging::PageTableFlags;
-    crate::paging::map_to(page, frame, PageTableFlags::WRITABLE, p4_table)
+    crate::mm::paging::map_to(page, frame, PageTableFlags::WRITABLE, p4_table)
         .expect("Failed to map page");
 
     // Test the mapping by writing to the VIRTUAL address
@@ -431,21 +418,21 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
     crate::serial_println!("Successfully read back: {:#X}", unsafe { *page_ptr });
 
     // Initalize the heap
-    crate::memory::init_heap(p4_table);
+    crate::mm::memory::init_heap(p4_table);
 
     // Give pages to the heap
     unsafe {
-        crate::allocator::ALLOCATOR
+        crate::mm::allocator::ALLOCATOR
             .lock()
-            .init(crate::memory::HEAP_START, crate::memory::HEAP_SIZE);
+            .init(crate::mm::memory::HEAP_START, crate::mm::memory::HEAP_SIZE);
     }
 
     crate::serial_println!("Heap initialized");
 
-    crate::cpu::init_cpu_local();
-    crate::syscall::init();
+    crate::arch::x86_64::cpu::init_cpu_local();
+    crate::process::syscall::init();
 
-    // crate::vga_buffer::WRITER.lock().clear();
+    // crate::drivers::vga_buffer::WRITER.lock().clear();
 
     let mut test_string = alloc::string::String::new();
     test_string.push_str("Hello now");
@@ -455,35 +442,35 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
     let (level_4_page_table_frame, _flags) = Cr3::read();
     let kernel_cr3_phys = level_4_page_table_frame.start_address().as_u64();
 
-    let process_0 = crate::process::Process {
+    let process_0 = crate::process::process::Process {
         pid: 0,
         page_table: kernel_cr3_phys,
     };
 
-    let mut sched = crate::process::SCHEDULER.lock();
+    let mut sched = crate::process::process::SCHEDULER.lock();
 
     sched.processes.push(Some(process_0));
 
-    let idle_task = crate::process::Thread::new(
+    let idle_task = crate::process::process::Thread::new(
         &mut sched,
-        crate::process::idle_task as *const () as u64,
+        crate::process::process::idle_task as *const () as u64,
         1024,
     );
 
     sched.set_idle_task(idle_task);
     drop(sched);
 
-    crate::process::spawn(crate::process::task_a, 1024);
-    crate::process::spawn(crate::process::task_b, 1024);
+    crate::process::process::spawn(crate::process::process::task_a, 1024);
+    crate::process::process::spawn(crate::process::process::task_b, 1024);
 
     // Disable the legacy PIC
     // Since its hardware timer is mapped to IRQ 0, which is mapped to Vector 8
     // In modern x86_64 vector 8 is used for double faults so it will esentially
     // instantly crash if not disabled
     // After disabling the legacy PIC, it will be mapped to Vector 32
-    unsafe { crate::apic::disable_legacy_pic() };
+    unsafe { crate::interrupts::apic::disable_legacy_pic() };
 
-    crate::apic::LOCAL_APIC
+    crate::interrupts::apic::LOCAL_APIC
         .lock()
         .as_ref()
         .unwrap()
@@ -494,7 +481,7 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
 
     // Unmask the keyboard!
     unsafe {
-        crate::io_apic::IO_APIC
+        crate::interrupts::io_apic::IO_APIC
             .lock()
             .as_ref()
             .unwrap()
@@ -507,7 +494,7 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
     }
     // loop {
     //     // Pop events off the queue and print them!
-    //     if let Some(key_event) = crate::keyboard::KEYBOARD_MAILBOX.receive() {
+    //     if let Some(key_event) = crate::drivers::keyboard::KEYBOARD_MAILBOX.receive() {
     //         match key_event {
     //             pc_keyboard::DecodedKey::Unicode(character) => crate::print!("{}", character),
     //             pc_keyboard::DecodedKey::RawKey(key) => crate::print!("{:?}", key),
