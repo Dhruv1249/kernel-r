@@ -118,6 +118,7 @@ pub unsafe fn jump_to_user_space(code_addr: u64, stack_addr: u64) -> ! {
             "push {rflags}",
             "push {cs}",
             "push {rip}",
+            "swapgs",
             "iretq",
             ss = in(reg) user_data,
             rsp = in(reg) stack_addr,

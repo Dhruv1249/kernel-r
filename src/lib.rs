@@ -443,6 +443,7 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
     crate::serial_println!("Heap initialized");
 
     crate::cpu::init_cpu_local();
+    crate::syscall::init();
 
     // crate::vga_buffer::WRITER.lock().clear();
 

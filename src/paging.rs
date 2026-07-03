@@ -273,7 +273,12 @@ pub fn setup_user_sandbox() -> (u64, u64) {
     crate::paging::map_to(code_page, code_frame, user_flags, active_table).expect("OOM");
     crate::paging::map_to(stack_page, stack_frame, user_flags, active_table).expect("OOM");
 
-    let machine_code: [u8; 2] = [0xEB, 0xFE]; // jmp $ (infinite loop)
+    // This assembly translates to:
+    // loop:
+    //   mov eax, 42    (0xB8, 0x2A, 0x00, 0x00, 0x00)
+    //   syscall        (0x0F, 0x05)
+    //   jmp loop       (0xEB, 0xF7)
+    let machine_code: [u8; 9] = [0xB8, 0x2A, 0x00, 0x00, 0x00, 0x0F, 0x05, 0xEB, 0xF7];
 
     unsafe {
         core::ptr::copy_nonoverlapping(

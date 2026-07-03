@@ -15,14 +15,11 @@ pub fn init() {
     let kernel_code = crate::gdt::kernel_code_selector();
     let kernel_data = crate::gdt::kernel_data_selector();
     let user_data = crate::gdt::user_data_selector();
+    let user_code = crate::gdt::user_code_selector();
 
     // The hardware math subtracts 8 from the user data selector to find the 32-bit base.
-    let user_base = x86_64::structures::gdt::SegmentSelector::new(
-        user_data.index() - 1,
-        x86_64::PrivilegeLevel::Ring3,
-    );
 
-    x86_64::registers::model_specific::Star::write(user_base, user_data, kernel_code, kernel_data).expect("FATAL: Invalid segment selectors passed to STAR MSR");
+    x86_64::registers::model_specific::Star::write(user_code, user_data, kernel_code, kernel_data).expect("FATAL: Invalid segment selectors passed to STAR MSR");
 
     x86_64::registers::model_specific::LStar::write(x86_64::VirtAddr::new(
         syscall_entry_stub as usize as u64,
@@ -51,7 +48,7 @@ core::arch::global_asm!(
     // Push SS (User Data Segment: Index 4 * 8 | Ring 3 = 0x23)
     "push 0x23",
     // Push RSP (The user stack we saved in the scratchpad)
-    "push gs:[16]",
+    "push qword ptr gs:[16]",
     // Push RFLAGS (syscall hardware saves this in R11)
     "push r11",
     // Push CS (User Code Segment: Index 5 * 8 | Ring 3 = 0x2B)
@@ -117,11 +114,45 @@ core::arch::global_asm!(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn rust_syscall_handler(context: &mut crate::process::ThreadContext) {
-    // The syscall number is traditionally passed in RAX
     let syscall_no = context.rax;
-    
-    crate::serial_println!("SYSCALL {} EXECUTED!", syscall_no);
-    
-    // For now, let's just return 0 (Success)
-    context.rax = 0; 
+
+    match syscall_no {
+        // SYS_WRITE (1)
+        // arg1 (rdi) = file descriptor (1 is stdout)
+        // arg2 (rsi) = virtual address of string buffer in user space
+        // arg3 (rdx) = length of string
+        1 => {
+            let fd = context.rdi;
+            let buf_ptr = context.rsi as *const u8;
+            let len = context.rdx as usize;
+
+            if fd == 1 || fd == 2 {
+                // Read the string safely from user memory
+                // (In a hardened OS, you'd validate that buf_ptr is a valid Ring 3 address first!)
+                let slice = unsafe { core::slice::from_raw_parts(buf_ptr, len) };
+                if let Ok(s) = core::str::from_utf8(slice) {
+                    crate::print!("{}", s);
+                    crate::serial_print!("{}", s);
+                }
+                context.rax = len as u64; // Return number of bytes written
+            } else {
+                context.rax = (!(9u64)).wrapping_add(1); // -9 (EBADF - Bad File Descriptor)
+            }
+        }
+
+        // SYS_EXIT (60)
+        // arg1 (rdi) = exit code
+        60 => {
+            let exit_code = context.rdi;
+            crate::serial_println!("User thread exited with code: {}", exit_code);
+            
+            crate::process::exit_thread();
+        }
+
+        // Unknown Syscall
+        _ => {
+            crate::serial_println!("Unknown Syscall: {}", syscall_no);
+            context.rax = (!(38u64)).wrapping_add(1); // -38 (ENOSYS - Function not implemented)
+        }
+    } 
 }

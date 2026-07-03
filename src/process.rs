@@ -298,8 +298,11 @@ impl Scheduler {
             if let Some(idle_task_id) = self.idle_task_id {
                 // Update current_task so we don't accidentally save the idle task's context over a real task next tick
                 self.current_task = Some(idle_task_id);
-                return self.tasks.get_mut(idle_task_id).unwrap().stack_pointer
-                    as *mut ThreadContext;
+                let task = self.tasks.get_mut(idle_task_id).unwrap();
+                unsafe {
+                    crate::cpu::PER_CPU_0.kernel_rsp = task.stack.as_ptr() as u64 + task.stack.len() as u64;
+                }
+                return task.stack_pointer as *mut ThreadContext;
             } else {
                 panic!("FATAL: Scheduling tree is empty and no idle task is set!");
             }
@@ -339,6 +342,10 @@ impl Scheduler {
 
         // Fetch the hardware context from our Rust ThreadArena
         if let Some(task) = self.tasks.get_mut(winner_idx) {
+            unsafe {
+                crate::cpu::PER_CPU_0.kernel_rsp = task.stack.as_ptr() as u64 + task.stack.len() as u64;
+            }
+            
             return task.stack_pointer as *mut ThreadContext;
         } else {
             // If the tree points to a dead/missing ID, we have a severe synchronization bug
@@ -637,18 +644,18 @@ pub extern "C" fn task_a() {
     loop {
         crate::serial_println!("Thread A going to sleep waiting for keypress...");
 
-        // let (code, stack) = crate::paging::setup_user_sandbox();
-        // unsafe { crate::gdt::jump_to_user_space(code, stack); }
+        let (code, stack) = crate::paging::setup_user_sandbox();
+        unsafe { crate::gdt::jump_to_user_space(code, stack); }
 
-        if let Some(key) = crate::keyboard::KEYBOARD_MAILBOX.receive() {
-            match key {
-                pc_keyboard::DecodedKey::Unicode(character) => {
-                    crate::print!("{}", character);
-                    crate::serial_print!("{}", character);
-                }
-                pc_keyboard::DecodedKey::RawKey(_key) => continue,
-            }
-        }
+        // if let Some(key) = crate::keyboard::KEYBOARD_MAILBOX.receive() {
+        //     match key {
+        //         pc_keyboard::DecodedKey::Unicode(character) => {
+        //             crate::print!("{}", character);
+        //             crate::serial_print!("{}", character);
+        //         }
+        //         pc_keyboard::DecodedKey::RawKey(_key) => continue,
+        //     }
+        // }
     }
 }
 
