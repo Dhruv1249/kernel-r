@@ -454,6 +454,12 @@ impl Scheduler {
         if let Some(task) = self.tasks.get_mut(task_idx) {
             if task.state == ThreadState::Sleeping || task.state == ThreadState::Blocked {
                 task.state = ThreadState::Ready;
+
+                let min_vruntime = self.system_runtime.saturating_sub(task.time_slice);
+                if task.vruntime < min_vruntime {
+                    task.vruntime = min_vruntime;
+                }
+
                 task.burst_score = 0;
                 task.update_deadline();
 

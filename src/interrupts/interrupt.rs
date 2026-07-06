@@ -1,6 +1,7 @@
 // src/interrupt.rs
 
 use crate::println;
+use alloc::string::ToString;
 use spin::Once;
 use x86_64::structures::idt::InterruptDescriptorTable;
 
@@ -128,7 +129,9 @@ extern "x86-interrupt" fn page_fault_handler(
     // Get active page table and map it
     let active_table = crate::mm::paging::active_level_4_table();
     let flags = x86_64::structures::paging::PageTableFlags::PRESENT
-        | x86_64::structures::paging::PageTableFlags::WRITABLE;
+        | x86_64::structures::paging::PageTableFlags::WRITABLE
+        | x86_64::structures::paging::PageTableFlags::USER_ACCESSIBLE
+        | x86_64::structures::paging::PageTableFlags::NO_EXECUTE;
 
     crate::mm::paging::map_to(page, physical_addr, flags, active_table)
         .expect("FATAL: demand paging failed to map page");
@@ -160,7 +163,12 @@ extern "x86-interrupt" fn double_fault_handler(
     stack_frame: InterruptStackFrame,
     _error_code: u64,
 ) -> ! {
-    panic!("EXCEPTION: DOUBLE FAULT\n{:#?}", stack_frame);
+
+    let mut serial_port = unsafe { uart_16550::SerialPort::new(0x3F8) };
+    use core::fmt::Write;
+    let _ = writeln!(serial_port, "FATAL: DOUBLE FAULT AT {:#x}", stack_frame.instruction_pointer);
+    panic!("FATAL: DOUBLE FAULT AT {:#x}", stack_frame.instruction_pointer);
+
 }
 
 unsafe extern "C" {

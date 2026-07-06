@@ -202,6 +202,11 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
     // Bootstrap the Buddy Allocator!
     crate::mm::memory::init_physical_memory(max_phys_addr as usize, entries, &mut allocator);
 
+    unsafe {
+        crate::arch::x86_64::cpu::enable_nx_bit();
+    }
+    
+
     serial_print!(
         "Allocating frame1: {:#x?}\n",
         crate::mm::memory::allocate_frame()
@@ -459,6 +464,8 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
             .lock()
             .init(crate::mm::memory::HEAP_START, crate::mm::memory::HEAP_SIZE);
     }
+
+    
 
     crate::serial_println!("Heap initialized");
 

@@ -77,7 +77,7 @@ pub fn map_to(
         }
     } else {
         // Ensure that is has the correct flags
-        let required_flags = flags & (PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE);
+        let required_flags = flags & (PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE);
 
         p4_entry.set_flags(p4_entry.flags() | required_flags);
     }
@@ -141,7 +141,7 @@ pub fn map_to(
         }
     } else {
         // Ensure that is has the correct flags
-        let required_flags = flags & (PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE);
+        let required_flags = flags & (PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE);
 
         p2_entry.set_flags(p2_entry.flags() | required_flags);
     }
@@ -324,8 +324,12 @@ pub fn setup_user_sandbox() -> (u64, u64) {
     let active_table = crate::mm::paging::active_level_4_table();
 
     // The user flags required to survive Ring 3 memory accesses
-    let user_flags =
-        PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+   let code_flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
+
+    let stack_flags = PageTableFlags::PRESENT 
+        | PageTableFlags::WRITABLE 
+        | PageTableFlags::USER_ACCESSIBLE 
+        | PageTableFlags::NO_EXECUTE;
 
     let code_virt_addr = x86_64::VirtAddr::new(0x4000_0000); // 1 GB mark
     let stack_virt_addr = x86_64::VirtAddr::new(0x8000_0000); // 2 GB mark
@@ -345,8 +349,8 @@ pub fn setup_user_sandbox() -> (u64, u64) {
         x86_64::PhysAddr::new(stack_phys_addr as u64),
     );
 
-    crate::mm::paging::map_to(code_page, code_frame, user_flags, active_table).expect("OOM");
-    crate::mm::paging::map_to(stack_page, stack_frame, user_flags, active_table).expect("OOM");
+    crate::mm::paging::map_to(code_page, code_frame, code_flags, active_table).expect("OOM");
+    crate::mm::paging::map_to(stack_page, stack_frame, stack_flags, active_table).expect("OOM");
 
     // This assembly translates to:
     // loop:

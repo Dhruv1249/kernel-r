@@ -20,11 +20,11 @@
 /// `src/process/syscall.rs` and `src/interrupts/interrupt.rs`.
 #[repr(C)]
 pub struct PerCpu {
-    pub cpu_id: u32,          // Offset 0
-    pub apic_id: u32,         // Offset 4
-    pub kernel_rsp: u64,      // Offset 8  <-- We will load this into RSP
-    pub user_rsp_scratch: u64,// Offset 16 <-- We will save the user's RSP here
-    pub current_task_ptr: *mut crate::process::process::Thread // Offset 24
+    pub cpu_id: u32,                                            // Offset 0
+    pub apic_id: u32,                                           // Offset 4
+    pub kernel_rsp: u64,       // Offset 8  <-- We will load this into RSP
+    pub user_rsp_scratch: u64, // Offset 16 <-- We will save the user's RSP here
+    pub current_task_ptr: *mut crate::process::process::Thread, // Offset 24
 }
 
 /// The single statically-allocated `PerCpu` block for logical CPU 0 (the BSP).
@@ -65,4 +65,16 @@ pub fn init_cpu_local() {
 
     let gs_base = x86_64::registers::model_specific::GsBase::read();
     crate::serial_println!("GS Base: {:#x}", gs_base.as_u64());
+}
+
+
+pub unsafe fn enable_nx_bit() {
+    use x86_64::registers::model_specific::{Efer, EferFlags};
+    let mut efer = Efer::read();
+    if !efer.contains(EferFlags::NO_EXECUTE_ENABLE) {
+        efer |= EferFlags::NO_EXECUTE_ENABLE;
+        unsafe {
+            Efer::write(efer);
+        }
+    }
 }
