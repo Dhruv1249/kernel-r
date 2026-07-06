@@ -146,6 +146,11 @@ impl BumpAllocator {
         }
     }
 
+
+    pub fn current_offset(&self) -> usize {
+        self.next_free_frame
+    }
+
     /// Allocates `count` physically contiguous, page-aligned, unreserved frames.
     ///
     /// Iterates over usable (`typ == 1`) memory map entries and searches for a
@@ -249,20 +254,12 @@ pub fn allocate_zeroed_frame() -> Option<usize> {
 /// Prints a summary of free RAM on the serial console when complete.
 // THE GRAND BOOTSTRAPPER
 pub fn init_physical_memory(
+    highest_addr: usize,
     memory_map: &'static [crate::boot::boot_info::MemoryMapEntry],
     bump_alloc: &mut BumpAllocator,
 ) {
     crate::serial_println!("Initializing O(1) Buddy Allocator...");
 
-    let mut highest_addr = 0;
-    for mem in memory_map {
-        if mem.typ == 1 {
-            let region_end = (mem.base_addr + mem.length) as usize;
-            if region_end > highest_addr {
-                highest_addr = region_end;
-            }
-        }
-    }
     // Steal memory for the Bitmap
     let bitmap_size = crate::mm::buddy::calculate_bitmap_size(highest_addr);
     let frames_for_bitmap = (bitmap_size + 4095) / 4096;
@@ -287,7 +284,7 @@ pub fn init_physical_memory(
 
     // Feed unreserved RAM into the Buddy System
     let mut buddy = FRAME_ALLOCATOR.lock();
-    let mut free_frames = 0;
+    let mut free_frames: usize = 0;
 
     for mem in memory_map {
         if mem.typ == 1 {

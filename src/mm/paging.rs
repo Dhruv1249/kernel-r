@@ -366,3 +366,64 @@ pub fn setup_user_sandbox() -> (u64, u64) {
     // Note: Stacks grow downwards, so return the *top* of the stack page!
     (code_virt_addr.as_u64(), stack_virt_addr.as_u64() + 4096)
 }
+
+// In src/mm/paging.rs
+
+/// Dynamically expands the PHYS_OFFSET direct mapping using 2 MiB Huge Pages
+/// to cover all physical RAM up to `highest_phys_addr`.
+pub fn map_all_physical_memory(
+    highest_phys_addr: u64,
+    p4_table: &mut x86_64::structures::paging::PageTable,
+    bump_alloc: &mut crate::mm::memory::BumpAllocator,
+) {
+    use x86_64::structures::paging::{PageTable, PageTableFlags};
+
+    // We already mapped 0 -> 1 GiB in boot.asm. Start mapping at 1 GiB (0x4000_0000).
+    let start_phys: u64 = 0x4000_0000;
+
+    let align_mask = (1 << 21) - 1; // 0x1FFFFF
+    let end_phys: u64 = (highest_phys_addr + align_mask) & !align_mask;
+
+    let mut current_phys = start_phys;
+
+    while current_phys < end_phys {
+        let virt_addr = x86_64::VirtAddr::new(current_phys + PHYS_OFFSET);
+
+        let p4_idx = virt_addr.p4_index();
+        let p3_idx = virt_addr.p3_index();
+        let p2_idx = virt_addr.p2_index();
+
+        if p4_table[p4_idx].is_unused() {
+            let frame = bump_alloc.allocate_contiguous_frames(1).expect("Early OOM");
+            unsafe {
+                core::ptr::write_bytes((frame as u64 + PHYS_OFFSET) as *mut u8, 0, 4096);
+            }
+            let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+            p4_table[p4_idx].set_addr(x86_64::PhysAddr::new(frame as u64), flags);
+        }
+
+        let p3_table_ptr = (p4_table[p4_idx].addr().as_u64() + PHYS_OFFSET) as *mut PageTable;
+        let p3_table = unsafe { &mut *p3_table_ptr };
+
+        if p3_table[p3_idx].is_unused() {
+            let frame = bump_alloc.allocate_contiguous_frames(1).expect("Early OOM");
+            unsafe {
+                core::ptr::write_bytes((frame as u64 + PHYS_OFFSET) as *mut u8, 0, 4096);
+            }
+            let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+            p3_table[p3_idx].set_addr(x86_64::PhysAddr::new(frame as u64), flags);
+        }
+
+        let p2_table_ptr = (p3_table[p3_idx].addr().as_u64() + PHYS_OFFSET) as *mut PageTable;
+        let p2_table = unsafe { &mut *p2_table_ptr };
+
+        let leaf_flags =
+            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::HUGE_PAGE;
+        p2_table[p2_idx].set_addr(x86_64::PhysAddr::new(current_phys), leaf_flags);
+
+        current_phys += 1 << 21;
+    }
+
+    // Flush TLB so CPU sees expanded mappings
+    x86_64::instructions::tlb::flush_all();
+}

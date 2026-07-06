@@ -28,11 +28,11 @@ extern crate alloc;
 // Our imports here — now organised into subsystem modules.
 pub mod arch;
 pub mod boot;
-pub mod mm;
+pub mod drivers;
 pub mod interrupts;
+pub mod mm;
 pub mod process;
 pub mod sync;
-pub mod drivers;
 use core::panic::PanicInfo;
 
 use x86_64::structures::paging::Size4KiB;
@@ -175,8 +175,32 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
 
     let mut allocator = crate::mm::memory::BumpAllocator::init(k_end, entries);
 
+    let mut max_phys_addr = 0u64;
+    for entry in entries {
+        if entry.typ == 1 {
+            // 1 = Usable RAM
+            let region_end = entry.base_addr + entry.length;
+            if region_end > max_phys_addr {
+                max_phys_addr = region_end;
+            }
+        }
+    }
+
+    crate::serial_println!(
+        "Detected highest physical RAM address: {:#X}",
+        max_phys_addr
+    );
+
+    crate::mm::paging::map_all_physical_memory(
+        max_phys_addr,
+        &mut crate::mm::paging::active_level_4_table(),
+        &mut allocator,
+    );
+
+    crate::mm::memory::reserve_region(k_end, allocator.current_offset(), "Direct Map Page Tables");
+
     // Bootstrap the Buddy Allocator!
-    crate::mm::memory::init_physical_memory(entries, &mut allocator);
+    crate::mm::memory::init_physical_memory(max_phys_addr as usize, entries, &mut allocator);
 
     serial_print!(
         "Allocating frame1: {:#x?}\n",
@@ -205,7 +229,8 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
                 unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(rsdp.rsdt_address)) };
             let rsdt_virt_addr =
                 x86_64::VirtAddr::new(rsdt_addr as u64 + crate::mm::paging::PHYS_OFFSET);
-            let sdt_header = unsafe { &*(rsdt_virt_addr.as_ptr::<crate::boot::boot_info::SdtHeader>()) };
+            let sdt_header =
+                unsafe { &*(rsdt_virt_addr.as_ptr::<crate::boot::boot_info::SdtHeader>()) };
 
             if unsafe {
                 !crate::validate_checksum(
@@ -216,8 +241,9 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
                 panic!("RSDT Checksum failed!");
             }
 
-            let num_entries =
-                (sdt_header.length as usize - core::mem::size_of::<crate::boot::boot_info::SdtHeader>()) / 4;
+            let num_entries = (sdt_header.length as usize
+                - core::mem::size_of::<crate::boot::boot_info::SdtHeader>())
+                / 4;
             let start_ptr = (rsdt_virt_addr.as_u64()
                 + core::mem::size_of::<crate::boot::boot_info::SdtHeader>() as u64)
                 as *const u32;
@@ -226,7 +252,8 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
                 let entry = unsafe { core::ptr::read_unaligned(start_ptr.add(i)) };
                 let entry_virt_addr =
                     x86_64::VirtAddr::new(entry as u64 + crate::mm::paging::PHYS_OFFSET);
-                let entry_header = unsafe { &*(entry_virt_addr.as_ptr::<crate::boot::boot_info::SdtHeader>()) };
+                let entry_header =
+                    unsafe { &*(entry_virt_addr.as_ptr::<crate::boot::boot_info::SdtHeader>()) };
                 let sdt_signature = unsafe {
                     core::ptr::read_unaligned(core::ptr::addr_of!(entry_header.signature))
                 };
@@ -245,7 +272,8 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
                 unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(rsdpv2.xsdt_address)) };
             let xsdt_virt_addr =
                 x86_64::VirtAddr::new(xsdt_addr as u64 + crate::mm::paging::PHYS_OFFSET);
-            let sdt_header = unsafe { &*(xsdt_virt_addr.as_ptr::<crate::boot::boot_info::SdtHeader>()) };
+            let sdt_header =
+                unsafe { &*(xsdt_virt_addr.as_ptr::<crate::boot::boot_info::SdtHeader>()) };
 
             if unsafe {
                 !crate::validate_checksum(
@@ -256,8 +284,9 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
                 panic!("XSDT Checksum failed!");
             }
 
-            let num_entries =
-                (sdt_header.length as usize - core::mem::size_of::<crate::boot::boot_info::SdtHeader>()) / 8;
+            let num_entries = (sdt_header.length as usize
+                - core::mem::size_of::<crate::boot::boot_info::SdtHeader>())
+                / 8;
             let start_ptr = (xsdt_virt_addr.as_u64()
                 + core::mem::size_of::<crate::boot::boot_info::SdtHeader>() as u64)
                 as *const u64;
@@ -265,7 +294,8 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
             for i in 0..num_entries {
                 let entry = unsafe { core::ptr::read_unaligned(start_ptr.add(i)) };
                 let entry_virt_addr = x86_64::VirtAddr::new(entry + crate::mm::paging::PHYS_OFFSET);
-                let entry_header = unsafe { &*(entry_virt_addr.as_ptr::<crate::boot::boot_info::SdtHeader>()) };
+                let entry_header =
+                    unsafe { &*(entry_virt_addr.as_ptr::<crate::boot::boot_info::SdtHeader>()) };
                 let sdt_signature = unsafe {
                     core::ptr::read_unaligned(core::ptr::addr_of!(entry_header.signature))
                 };
@@ -299,7 +329,8 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
         crate::serial_println!("Local APIC Address: {:#x}", local_apic_addr);
 
         let lapic_phys = x86_64::PhysAddr::new(local_apic_addr as u64);
-        let lapic_virt = x86_64::VirtAddr::new(local_apic_addr as u64 + crate::mm::paging::PHYS_OFFSET);
+        let lapic_virt =
+            x86_64::VirtAddr::new(local_apic_addr as u64 + crate::mm::paging::PHYS_OFFSET);
 
         crate::mm::paging::map_to(
             x86_64::structures::paging::Page::<Size4KiB>::containing_address(lapic_virt),
@@ -323,8 +354,9 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
 
         while current_offset < total_table_length {
             let record_virt_addr = x86_64::VirtAddr::new(madt_virt.as_u64() + current_offset);
-            let record_header =
-                unsafe { &*(record_virt_addr.as_ptr::<crate::boot::boot_info::MadtRecordHeader>()) };
+            let record_header = unsafe {
+                &*(record_virt_addr.as_ptr::<crate::boot::boot_info::MadtRecordHeader>())
+            };
 
             if record_header.record_length < 2 {
                 crate::serial_println!("Reached zero-padded region of MADT. Breaking loop.");
@@ -332,8 +364,9 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
             }
 
             if record_header.entry_type == 1 {
-                let io_apic_record =
-                    unsafe { &*(record_virt_addr.as_ptr::<crate::boot::boot_info::IoApicRecord>()) };
+                let io_apic_record = unsafe {
+                    &*(record_virt_addr.as_ptr::<crate::boot::boot_info::IoApicRecord>())
+                };
                 let io_apic_addr = unsafe {
                     core::ptr::read_unaligned(core::ptr::addr_of!(io_apic_record.io_apic_address))
                 };
@@ -504,6 +537,4 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
     //         x86_64::instructions::hlt();
     //     }
     // }
-
 }
-

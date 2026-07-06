@@ -395,15 +395,15 @@ impl Scheduler {
         //  Safely read the task_id out of the C struct
         let winner_idx = unsafe { (*leftmost_node).task_id as usize };
 
-        self.current_task = Some(winner_idx);
-
-        let next_pid = self.tasks.get_mut(winner_idx).unwrap().pid;
-
         let prev_pid = if let Some(prev_idx) = self.current_task {
             self.tasks.get_mut(prev_idx).unwrap().pid as usize
         } else {
             usize::MAX
         };
+
+        self.current_task = Some(winner_idx);
+
+        let next_pid = self.tasks.get_mut(winner_idx).unwrap().pid;
 
         if prev_pid as u64 != next_pid {
             let slot: &Option<Process> = &self.processes[next_pid as usize];
