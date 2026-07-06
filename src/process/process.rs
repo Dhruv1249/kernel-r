@@ -253,6 +253,7 @@ pub struct Scheduler {
     pub current_task: Option<usize>,
     pub tree_root: *mut SchedNode,
     pub idle_task_id: Option<usize>,
+    pub graveyard: alloc::collections::VecDeque<usize>, // Dead tasks
 }
 
 pub static SCHEDULER: crate::mm::allocator::Locked<Scheduler> =
@@ -268,8 +269,22 @@ impl Scheduler {
             current_task: None,
             tree_root: core::ptr::null_mut(),
             idle_task_id: None,
+            graveyard: alloc::collections::VecDeque::new(),
         }
     }
+
+    pub fn reap_zombies(&mut self) {
+        let len = self.graveyard.len();
+        for _i in 0..len {
+            let zombie_id = self.graveyard.pop_front();
+            if zombie_id != self.current_task {
+                self.tasks.remove(zombie_id.unwrap());
+            } else {
+                self.graveyard.push_back(zombie_id.unwrap());
+            }
+        }
+    }
+
     pub fn add_task(&mut self, task: Thread) -> usize {
         self.total_weight += task.weight;
         let vruntime = task.vruntime;
@@ -307,6 +322,8 @@ impl Scheduler {
             return context as *mut ThreadContext;
         }
 
+        self.reap_zombies();
+
         // We know the APIC timer ticks exactly once per millisecond
         let time_consumed: u64 = 1_000_000; // 1ms in nanoseconds
 
@@ -319,28 +336,27 @@ impl Scheduler {
                         // Re-box it and let it immediately go out of scope to free the heap memory!
                         let _ = unsafe { alloc::boxed::Box::from_raw(raw_node) };
                     }
-                    self.tasks.remove(task_idx);
-                    self.current_task = None;
-                    return self.schedule(context);
+                    self.graveyard.push_back(task_idx);
+                    task.rb_node = core::ptr::null_mut();
+                } else {
+                    // Save its hardware context
+                    task.stack_pointer = context as *mut _ as u64;
+
+                    // Update Real Runtime
+                    task.real_runtime += time_consumed;
+
+                    // Update BORE BURST SCORE
+                    task.burst_score = (task.burst_score + time_consumed) >> 1;
+
+                    // Update System Virtual Time (V)
+                    self.system_runtime += (time_consumed << 20) / self.total_weight;
+
+                    // Update Thread Deadline
+                    task.update_deadline();
+
+                    // Update Thread Lag
+                    task.lag = self.system_runtime as i64 - task.vruntime as i64;
                 }
-
-                // Save its hardware context
-                task.stack_pointer = context as *mut _ as u64;
-
-                // Update Real Runtime
-                task.real_runtime += time_consumed;
-
-                // Update BORE BURST SCORE
-                task.burst_score = (task.burst_score + time_consumed) >> 1;
-
-                // Update System Virtual Time (V)
-                self.system_runtime += (time_consumed << 20) / self.total_weight;
-
-                // Update Thread Deadline
-                task.update_deadline();
-
-                // Update Thread Lag
-                task.lag = self.system_runtime as i64 - task.vruntime as i64;
 
                 if task.state == ThreadState::Ready
                     && task.tid as usize != self.idle_task_id.unwrap()
@@ -363,7 +379,8 @@ impl Scheduler {
                 self.current_task = Some(idle_task_id);
                 let task = self.tasks.get_mut(idle_task_id).unwrap();
                 unsafe {
-                    crate::arch::x86_64::cpu::PER_CPU_0.kernel_rsp = task.stack.as_ptr() as u64 + task.stack.len() as u64;
+                    crate::arch::x86_64::cpu::PER_CPU_0.kernel_rsp =
+                        task.stack.as_ptr() as u64 + task.stack.len() as u64;
                 }
                 return task.stack_pointer as *mut ThreadContext;
             } else {
@@ -406,9 +423,11 @@ impl Scheduler {
         // Fetch the hardware context from our Rust ThreadArena
         if let Some(task) = self.tasks.get_mut(winner_idx) {
             unsafe {
-                crate::arch::x86_64::cpu::PER_CPU_0.kernel_rsp = task.stack.as_ptr() as u64 + task.stack.len() as u64;
+                let stack_top = task.stack.as_ptr() as u64 + task.stack.len() as u64;
+                crate::arch::x86_64::cpu::PER_CPU_0.kernel_rsp = stack_top;
+                crate::arch::x86_64::gdt::set_tss_rsp0(x86_64::VirtAddr::new(stack_top));
             }
-            
+
             return task.stack_pointer as *mut ThreadContext;
         } else {
             // If the tree points to a dead/missing ID, we have a severe synchronization bug
@@ -736,7 +755,9 @@ pub extern "C" fn task_a() {
         crate::serial_println!("Thread A going to sleep waiting for keypress...");
 
         let (code, stack) = crate::mm::paging::setup_user_sandbox();
-        unsafe { crate::arch::x86_64::gdt::jump_to_user_space(code, stack); }
+        unsafe {
+            crate::arch::x86_64::gdt::jump_to_user_space(code, stack);
+        }
 
         // if let Some(key) = crate::drivers::keyboard::KEYBOARD_MAILBOX.receive() {
         //     match key {

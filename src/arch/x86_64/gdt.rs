@@ -176,6 +176,16 @@ pub fn init() {
     serial_println!("GDT init complete");
 }
 
+
+/// Updates the TSS privilege_stack_table[0] (RSP0) to point to the given stack top.
+pub unsafe fn set_tss_rsp0(stack_top: VirtAddr) {
+    let tss = TSS_ONCE.r#try().expect("TSS not initialized");
+    let tss_ptr = &tss.0 as *const _ as *mut TaskStateSegment;
+    unsafe {
+        (*tss_ptr).privilege_stack_table[0] = stack_top;
+    }
+}
+
 /// Performs a privilege-level transition from Ring 0 into Ring 3 at `code_addr`.
 ///
 /// # How it works
