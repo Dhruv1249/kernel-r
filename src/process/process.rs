@@ -681,6 +681,82 @@ pub fn join(target_tid: usize) {
     }
 }
 
+// src/process/process.rs
+
+/// Spawns a user-mode process in its own isolated address space.
+pub fn spawn_user_process(machine_code: &[u8], weight: u64) -> usize {
+    let user_pml4 = crate::mm::paging::create_user_address_space().unwrap();
+
+    let virt_addr = x86_64::VirtAddr::new(user_pml4.as_u64() + crate::mm::paging::PHYS_OFFSET);
+    let user_pml4_table =
+        unsafe { &mut *(virt_addr.as_mut_ptr() as *mut x86_64::structures::paging::PageTable) };
+
+    let code_frame = crate::mm::memory::allocate_frame().expect("OOM");
+
+    crate::mm::paging::map_to(
+        x86_64::structures::paging::Page::containing_address(x86_64::VirtAddr::new(0x4000_0000)),
+        x86_64::structures::paging::PhysFrame::containing_address(x86_64::PhysAddr::new(
+            code_frame as u64,
+        )),
+        x86_64::structures::paging::PageTableFlags::PRESENT
+            | x86_64::structures::paging::PageTableFlags::WRITABLE
+            | x86_64::structures::paging::PageTableFlags::USER_ACCESSIBLE,
+        user_pml4_table,
+    )
+    .expect("OOM");
+
+    let stack_frame = crate::mm::memory::allocate_frame().expect("OOM");
+
+    crate::mm::paging::map_to(
+        x86_64::structures::paging::Page::containing_address(x86_64::VirtAddr::new(0x8000_0000)),
+        x86_64::structures::paging::PhysFrame::containing_address(x86_64::PhysAddr::new(
+            stack_frame as u64,
+        )),
+        x86_64::structures::paging::PageTableFlags::PRESENT
+            | x86_64::structures::paging::PageTableFlags::WRITABLE
+            | x86_64::structures::paging::PageTableFlags::USER_ACCESSIBLE
+            | x86_64::structures::paging::PageTableFlags::NO_EXECUTE,
+        user_pml4_table,
+    )
+    .expect("OOM");
+
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            machine_code.as_ptr(),
+            (code_frame as u64 + crate::mm::paging::PHYS_OFFSET) as *mut u8,
+            machine_code.len(),
+        );
+    }
+
+    let mut sched = SCHEDULER.lock();
+
+    let pid = sched.processes.len() as u64;
+    let process = Process {
+        pid,
+        page_table: user_pml4.as_u64(),
+    };
+
+    sched.processes.push(Some(process));
+
+    let mut thread =
+        crate::process::process::Thread::new(&mut sched, user_mode_trampoline as u64, weight);
+    
+    thread.pid = pid;
+
+    let tid = sched.add_task(thread);
+    return tid;
+}
+
+/// A tiny kernel thread that drops privileges and jumps to user space.
+pub extern "C" fn user_mode_trampoline() {
+    let stack_top = 0x8000_0000 + 4096;
+    let code_addr = 0x4000_0000;
+    
+    unsafe {
+        crate::arch::x86_64::gdt::jump_to_user_space(code_addr, stack_top);
+    }
+}
+
 // Global asm so rust knows how to call this function and doesn't mess with the stack
 core::arch::global_asm!(
     // ISR -> Interrupt Service Routine

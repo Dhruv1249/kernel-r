@@ -431,3 +431,22 @@ pub fn map_all_physical_memory(
     // Flush TLB so CPU sees expanded mappings
     x86_64::instructions::tlb::flush_all();
 }
+
+
+/// Creates a new, isolated page table for a user process.
+/// Returns the physical address of the newly created PML4 frame.
+pub fn create_user_address_space() -> Option<x86_64::PhysAddr> {
+    let frame = crate::mm::memory::allocate_zeroed_frame()?;
+    
+    let virt_addr = x86_64::VirtAddr::new(frame as u64 + crate::mm::paging::PHYS_OFFSET);
+    
+    let p4_table = unsafe { &mut *(virt_addr.as_mut_ptr() as *mut x86_64::structures::paging::PageTable) };
+    
+    let active_pml4 = crate::mm::paging::active_level_4_table();
+    
+    for i in 256..512 {
+        p4_table[i] = active_pml4[i].clone();
+    }
+    
+    Some(x86_64::PhysAddr::new(frame as u64))
+}

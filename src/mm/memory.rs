@@ -14,7 +14,7 @@ pub static FRAME_ALLOCATOR: crate::mm::allocator::Locked<crate::mm::buddy::Buddy
 /// Chosen to be in the upper half of the 64-bit address space, far away from
 /// any identity-mapped physical memory.  Pages in this region are demand-mapped
 /// by the page-fault handler in `interrupts::interrupt`.
-pub const HEAP_START: usize = 0x_4444_4444_0000;
+pub const HEAP_START: usize = 0xFFFF_9000_0000_0000;
 
 /// Size of the kernel heap in bytes (10 MiB).
 ///

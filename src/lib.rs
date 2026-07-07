@@ -6,6 +6,7 @@
 // That's why disabling it here.
 #![no_std]
 #![allow(dead_code)]
+#![allow(function_casts_as_integer)]
 // Also just learned #! -> for whole crate and only # -> for module directly below it!
 #![feature(abi_x86_interrupt)]
 // We think rust starts with main, but in reality its entry point is a _start functions which
@@ -205,7 +206,6 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
     unsafe {
         crate::arch::x86_64::cpu::enable_nx_bit();
     }
-    
 
     serial_print!(
         "Allocating frame1: {:#x?}\n",
@@ -465,8 +465,6 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
             .init(crate::mm::memory::HEAP_START, crate::mm::memory::HEAP_SIZE);
     }
 
-    
-
     crate::serial_println!("Heap initialized");
 
     crate::arch::x86_64::cpu::init_cpu_local();
@@ -500,8 +498,15 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
     sched.set_idle_task(idle_task);
     drop(sched);
 
-    crate::process::process::spawn(crate::process::process::task_a, 1024);
-    crate::process::process::spawn(crate::process::process::task_b, 1024);
+    let user_code: [u8; 12] = [
+        0xB8, 0x3C, 0x00, 0x00, 0x00, 0xBF, 0x2A, 0x00, 0x00, 0x00, 0x0F, 0x05,
+    ];
+
+    crate::serial_println!("Spawning isolated Ring 3 user process...");
+    crate::process::process::spawn_user_process(&user_code, 1024);
+
+    // crate::process::process::spawn(crate::process::process::task_a, 1024);
+    // crate::process::process::spawn(crate::process::process::task_b, 1024);
 
     // Disable the legacy PIC
     // Since its hardware timer is mapped to IRQ 0, which is mapped to Vector 8
