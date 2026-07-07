@@ -1,7 +1,6 @@
 // src/interrupt.rs
 
 use crate::println;
-use alloc::string::ToString;
 use spin::Once;
 use x86_64::structures::idt::InterruptDescriptorTable;
 

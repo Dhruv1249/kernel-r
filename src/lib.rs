@@ -497,13 +497,18 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
 
     sched.set_idle_task(idle_task);
     drop(sched);
+    #[repr(C, align(8))]
+    struct AlignedElf(
+        [u8; include_bytes!("../../dummy_elf/target/x86_64-unknown-none/release/dummy_elf").len()],
+    );
 
-    let user_code: [u8; 12] = [
-        0xB8, 0x3C, 0x00, 0x00, 0x00, 0xBF, 0x2A, 0x00, 0x00, 0x00, 0x0F, 0x05,
-    ];
+    // Embed the file into the kernel's .rodata section, properly aligned
+    static ELF_DATA: AlignedElf = AlignedElf(*include_bytes!(
+        "../../dummy_elf/target/x86_64-unknown-none/release/dummy_elf"
+    ));
 
-    crate::serial_println!("Spawning isolated Ring 3 user process...");
-    crate::process::process::spawn_user_process(&user_code, 1024);
+    crate::serial_println!("Spawning ELF Ring 3 user process...");
+    crate::process::process::spawn_user_process(&ELF_DATA.0, 1024);
 
     // crate::process::process::spawn(crate::process::process::task_a, 1024);
     // crate::process::process::spawn(crate::process::process::task_b, 1024);

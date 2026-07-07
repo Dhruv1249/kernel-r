@@ -684,7 +684,12 @@ pub fn join(target_tid: usize) {
 // src/process/process.rs
 
 /// Spawns a user-mode process in its own isolated address space.
-pub fn spawn_user_process(machine_code: &[u8], weight: u64) -> usize {
+pub fn spawn_user_process(elf_data: &[u8], weight: u64) -> usize {
+
+
+    let elf = xmas_elf::ElfFile::new(elf_data).expect("Failed to parse ELF");
+    let entry_point = elf.header.pt2.entry_point();
+
     let user_pml4 = crate::mm::paging::create_user_address_space().unwrap();
 
     let virt_addr = x86_64::VirtAddr::new(user_pml4.as_u64() + crate::mm::paging::PHYS_OFFSET);
@@ -705,6 +710,54 @@ pub fn spawn_user_process(machine_code: &[u8], weight: u64) -> usize {
     )
     .expect("OOM");
 
+    for ph in elf.program_iter() {
+        if let Ok(xmas_elf::program::Type::Load) = ph.get_type() {
+            let vaddr = ph.virtual_addr();
+            let mem_size = ph.mem_size();
+            let file_size = ph.file_size();
+            let offset = ph.offset();
+
+            let start_page = vaddr / 4096;
+            let end_page = (vaddr + mem_size - 1) / 4096;
+
+            let mut current_file_offset = offset;
+            let mut remaining_file_bytes = file_size;
+            let mut current_vaddr = vaddr;
+
+            for page_num in start_page..=end_page {
+                let page_vaddr = page_num * 4096;
+
+                let frame = crate::mm::memory::allocate_zeroed_frame().expect("OOM");
+
+                crate::mm::paging::map_to(
+                    x86_64::structures::paging::Page::containing_address(x86_64::VirtAddr::new(page_vaddr)),
+                    x86_64::structures::paging::PhysFrame::containing_address(x86_64::PhysAddr::new(frame as u64)),
+                    x86_64::structures::paging::PageTableFlags::PRESENT
+                        | x86_64::structures::paging::PageTableFlags::WRITABLE
+                        | x86_64::structures::paging::PageTableFlags::USER_ACCESSIBLE,
+                    user_pml4_table,
+                ).expect("OOM");
+
+                let page_offset = if current_vaddr > page_vaddr { current_vaddr - page_vaddr } else { 0 };
+                let bytes_to_copy = core::cmp::min(remaining_file_bytes, 4096 - page_offset);
+
+                if bytes_to_copy > 0 {
+                    // Get the virtual pointer to the physical frame via PHYS_OFFSET
+                    let dest_ptr = (frame as u64 + crate::mm::paging::PHYS_OFFSET + page_offset) as *mut u8;
+                    let src_ptr = unsafe { elf_data.as_ptr().add(current_file_offset as usize) };
+                    
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(src_ptr, dest_ptr, bytes_to_copy as usize);
+                    }
+
+                    remaining_file_bytes -= bytes_to_copy;
+                    current_file_offset += bytes_to_copy;
+                    current_vaddr += bytes_to_copy;
+                }
+            }
+        }
+    }
+
     let stack_frame = crate::mm::memory::allocate_frame().expect("OOM");
 
     crate::mm::paging::map_to(
@@ -719,15 +772,6 @@ pub fn spawn_user_process(machine_code: &[u8], weight: u64) -> usize {
         user_pml4_table,
     )
     .expect("OOM");
-
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            machine_code.as_ptr(),
-            (code_frame as u64 + crate::mm::paging::PHYS_OFFSET) as *mut u8,
-            machine_code.len(),
-        );
-    }
-
     let mut sched = SCHEDULER.lock();
 
     let pid = sched.processes.len() as u64;
@@ -740,6 +784,11 @@ pub fn spawn_user_process(machine_code: &[u8], weight: u64) -> usize {
 
     let mut thread =
         crate::process::process::Thread::new(&mut sched, user_mode_trampoline as u64, weight);
+
+    unsafe {
+        let context_ptr = thread.stack_pointer as *mut crate::process::process::ThreadContext;
+        (*context_ptr).rdi = entry_point;
+    }
     
     thread.pid = pid;
 
@@ -748,12 +797,11 @@ pub fn spawn_user_process(machine_code: &[u8], weight: u64) -> usize {
 }
 
 /// A tiny kernel thread that drops privileges and jumps to user space.
-pub extern "C" fn user_mode_trampoline() {
+pub extern "C" fn user_mode_trampoline(enty_point: u64) {
     let stack_top = 0x8000_0000 + 4096;
-    let code_addr = 0x4000_0000;
     
     unsafe {
-        crate::arch::x86_64::gdt::jump_to_user_space(code_addr, stack_top);
+        crate::arch::x86_64::gdt::jump_to_user_space(enty_point, stack_top);
     }
 }
 
