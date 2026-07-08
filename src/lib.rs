@@ -483,6 +483,8 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
     let process_0 = crate::process::process::Process {
         pid: 0,
         page_table: kernel_cr3_phys,
+        heap_start: 0,
+        program_break: 0,
     };
 
     let mut sched = crate::process::process::SCHEDULER.lock();

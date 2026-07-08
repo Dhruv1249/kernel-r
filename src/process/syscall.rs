@@ -147,15 +147,22 @@ core::arch::global_asm!(
 pub extern "C" fn rust_syscall_handler(context: &mut crate::process::process::ThreadContext) {
     let syscall_no = context.rax;
 
+    let arg1 = context.rdi;
+    let arg2 = context.rsi;
+    let arg3 = context.rdx;
+    let arg4 = context.r10;
+    let arg5 = context.r8; 
+    let arg6 = context.r9;
+
     match syscall_no {
         // SYS_WRITE (1)
         // arg1 (rdi) = file descriptor (1 is stdout)
         // arg2 (rsi) = virtual address of string buffer in user space
         // arg3 (rdx) = length of string
         1 => {
-            let fd = context.rdi;
-            let buf_ptr = context.rsi as *const u8;
-            let len = context.rdx as usize;
+            let fd = arg1;
+            let buf_ptr = arg2 as *const u8;
+            let len = arg3 as usize;
 
             if fd == 1 || fd == 2 {
                 // Read the string safely from user memory
@@ -174,10 +181,31 @@ pub extern "C" fn rust_syscall_handler(context: &mut crate::process::process::Th
         // SYS_EXIT (60)
         // arg1 (rdi) = exit code
         60 => {
-            let exit_code = context.rdi;
+            let exit_code = arg1;
             crate::serial_println!("User thread exited with code: {}", exit_code);
             
             crate::process::process::exit_thread();
+        }
+
+        12 => {
+            let requested_break = arg1;
+            
+            let mut sched = crate::process::process::SCHEDULER.lock();
+            
+            let curent_task_id = sched.current_task.expect("FATAL: No current task!");
+            
+            let pid = sched.tasks.get_mut(curent_task_id).unwrap().pid;
+            
+            let process: &mut crate::process::process::Process = sched.processes.get_mut(pid as usize).unwrap().as_mut().unwrap();
+            
+            if requested_break == 0 || requested_break < process.heap_start {
+                context.rax = process.program_break;
+            } else {
+                process.program_break = requested_break;
+                context.rax = requested_break;
+            }
+            
+            // Step 6: Drop the scheduler lock.
         }
 
         // Unknown Syscall

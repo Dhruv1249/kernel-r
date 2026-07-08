@@ -89,10 +89,29 @@ extern "x86-interrupt" fn page_fault_handler(
 ) {
     // Faulting address
     let fault_addr = x86_64::registers::control::Cr2::read();
+    let fault_u64 = fault_addr.as_u64();
 
     let heap_start = crate::mm::memory::HEAP_START as u64;
     let heap_size = crate::mm::memory::HEAP_SIZE as u64;
-    if fault_addr.as_u64() < heap_start || fault_addr.as_u64() >= heap_start + heap_size {
+    let is_kernel_heap = fault_u64 >= heap_start && fault_u64 < heap_start + heap_size;
+
+    let mut is_user_heap = false;
+
+    {
+        let mut sched = crate::process::process::SCHEDULER.lock();
+        if let Some(tid) = sched.current_task {
+            let pid = sched.tasks.get_mut(tid).unwrap().pid;
+            if let Some(Some(process)) = sched.processes.get(pid as usize) {
+                // Check if the fault falls within the user's allocated program break
+                if fault_u64 >= process.heap_start && fault_u64 < process.program_break {
+                    is_user_heap = true;
+                }
+            }
+        }
+    }
+
+
+    if !is_kernel_heap && !is_user_heap {
         crate::serial_print!(
             "EXCEPTION: PAGE FAULT\n{:#?}\n Error code: {:#?}",
             stack_frame,
@@ -127,10 +146,13 @@ extern "x86-interrupt" fn page_fault_handler(
 
     // Get active page table and map it
     let active_table = crate::mm::paging::active_level_4_table();
-    let flags = x86_64::structures::paging::PageTableFlags::PRESENT
+    let mut flags = x86_64::structures::paging::PageTableFlags::PRESENT
         | x86_64::structures::paging::PageTableFlags::WRITABLE
-        | x86_64::structures::paging::PageTableFlags::USER_ACCESSIBLE
         | x86_64::structures::paging::PageTableFlags::NO_EXECUTE;
+
+    if is_user_heap {
+        flags |= x86_64::structures::paging::PageTableFlags::USER_ACCESSIBLE;
+    }
 
     crate::mm::paging::map_to(page, physical_addr, flags, active_table)
         .expect("FATAL: demand paging failed to map page");

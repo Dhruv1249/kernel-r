@@ -65,6 +65,8 @@ pub enum ThreadState {
 pub struct Process {
     pub pid: u64,
     pub page_table: u64,
+    pub heap_start: u64,
+    pub program_break: u64,
 }
 
 /// A kernel thread — the schedulable unit of execution.
@@ -710,6 +712,8 @@ pub fn spawn_user_process(elf_data: &[u8], weight: u64) -> usize {
     )
     .expect("OOM");
 
+    let mut highest_vaddr: u64 = 0;
+
     for ph in elf.program_iter() {
         if let Ok(xmas_elf::program::Type::Load) = ph.get_type() {
             let vaddr = ph.virtual_addr();
@@ -723,6 +727,8 @@ pub fn spawn_user_process(elf_data: &[u8], weight: u64) -> usize {
             let mut current_file_offset = offset;
             let mut remaining_file_bytes = file_size;
             let mut current_vaddr = vaddr;
+
+            highest_vaddr = core::cmp::max(highest_vaddr, vaddr + mem_size);
 
             for page_num in start_page..=end_page {
                 let page_vaddr = page_num * 4096;
@@ -774,10 +780,14 @@ pub fn spawn_user_process(elf_data: &[u8], weight: u64) -> usize {
     .expect("OOM");
     let mut sched = SCHEDULER.lock();
 
+    let initial_heap_start = crate::mm::allocator::align_to(highest_vaddr as usize, 4096);
+
     let pid = sched.processes.len() as u64;
     let process = Process {
         pid,
         page_table: user_pml4.as_u64(),
+        heap_start: initial_heap_start as u64,
+        program_break: 0,
     };
 
     sched.processes.push(Some(process));
