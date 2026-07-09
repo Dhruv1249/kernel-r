@@ -57,7 +57,7 @@ pub enum ThreadState {
     Zombie,
 }
 
-pub const MAX_FDS: usize = 3;
+pub const MAX_FDS: usize = 1024;
 
 /// A kernel process — a container for a page table (address space).
 ///

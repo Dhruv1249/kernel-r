@@ -146,6 +146,47 @@ pub extern "C" fn rust_syscall_handler(context: &mut crate::process::process::Th
     let arg6 = context.r9;
 
     match syscall_no {
+
+        // SYS_READ (0)
+        0 => {
+            let fd = arg1 as usize;
+            let buf_ptr = arg2 as *mut u8; 
+            let len = arg3 as usize;
+
+            if fd >= crate::process::process::MAX_FDS {
+                context.rax = (!(9u64)).wrapping_add(1); // EBADF
+            } else {
+                let mut sched = crate::process::process::SCHEDULER.lock();
+                let current_task_id = sched.current_task.expect("FATAL: No current task!");
+
+                let pid = sched.tasks.get_mut(current_task_id).unwrap().pid;
+
+                let process: &crate::process::process::Process =
+                    sched.processes.get(pid as usize).unwrap().as_ref().unwrap();
+
+                let file = process.fd_table[fd as usize].as_ref();
+
+                if let Some(file_arc) = file {
+                    let mut file: spin::MutexGuard<crate::fs::vfs::OpenFile> = file_arc.lock();
+
+                    if file.readable {
+                        let slice = unsafe { core::slice::from_raw_parts_mut(buf_ptr, len) };
+                        if let Some(bytes_read) = file.vnode.read(file.offset, slice) {
+                            file.offset += bytes_read;
+                            context.rax = bytes_read as u64;
+                        } else {
+                            context.rax = (!(9u64)).wrapping_add(1); // EBADF
+                        }
+                    } else {
+                        context.rax = (!(9u64)).wrapping_add(1); // EBADF
+                    }
+                } else {
+                    context.rax = (!(9u64)).wrapping_add(1); // EBADF
+                }
+            }
+        }
+
+
         // SYS_WRITE (1)
         // arg1 (rdi) = file descriptor (1 is stdout)
         // arg2 (rsi) = virtual address of string buffer in user space
@@ -169,7 +210,7 @@ pub extern "C" fn rust_syscall_handler(context: &mut crate::process::process::Th
                 let file = process.fd_table[fd as usize].as_ref();
 
                 if let Some(file_arc) = file {
-                    let mut file = file_arc.lock();
+                    let mut file: spin::MutexGuard<crate::fs::vfs::OpenFile> = file_arc.lock();
 
                     if file.writable {
                         let slice = unsafe { core::slice::from_raw_parts(buf_ptr, len) };
@@ -184,6 +225,70 @@ pub extern "C" fn rust_syscall_handler(context: &mut crate::process::process::Th
                     }
                 } else {
                     context.rax = (!(9u64)).wrapping_add(1); // EBADF
+                }
+            }
+        }
+
+        // SYS_OPEN (2)
+        2 => {
+            let filename_ptr = arg1 as *const u8;
+
+            let mut len = 0;
+            unsafe {
+                for i in 0..256 {
+                    if *(filename_ptr.add(i)) == 0 {
+                        len = i;
+                        break;
+                    }
+                }
+            }
+
+            if len == 0 {
+                context.rax = (!(2u64)).wrapping_add(1); // ENOENT (Bad filename string)
+            } else {
+
+                let slice = unsafe { core::slice::from_raw_parts(filename_ptr, len) };
+               if let Ok(filename) = core::str::from_utf8(slice) {
+                    let root_lock = crate::fs::vfs::ROOT_FS.lock();
+
+                    if let Some(root_dir) = root_lock.as_ref() {
+                        if let Some(vnode) = root_dir.lookup(filename) {
+                            
+                            let mut sched = crate::process::process::SCHEDULER.lock();
+                            let current_task_id = sched.current_task.expect("FATAL: No current task!");
+                            let pid = sched.tasks.get_mut(current_task_id).unwrap().pid;
+                            let process = sched.processes.get_mut(pid as usize).unwrap().as_mut().unwrap();
+
+                            let mut assigned_fd = None;
+                            for i in 3..crate::process::process::MAX_FDS {
+                                if process.fd_table[i].is_none() {
+                                    assigned_fd = Some(i);
+                                    break;
+                                }
+                            }
+
+                            if let Some(fd) = assigned_fd {
+                                process.fd_table[fd] = Some(alloc::sync::Arc::new(spin::Mutex::new(
+                                    crate::fs::vfs::OpenFile {
+                                        vnode, 
+                                        offset: 0,
+                                        readable: true,
+                                        writable: false, 
+                                    }
+                                )));
+                                context.rax = fd as u64; // Success! Return the FD.
+                            } else {
+                                context.rax = (!(24u64)).wrapping_add(1); // EMFILE
+                            }
+
+                        } else {
+                            context.rax = (!(2u64)).wrapping_add(1); // ENOENT (Not found)
+                        }
+                    } else {
+                        context.rax = (!(2u64)).wrapping_add(1); // ENOENT (No Root FS)
+                    }
+                } else {
+                    context.rax = (!(2u64)).wrapping_add(1); // ENOENT (Bad UTF-8)
                 }
             }
         }
