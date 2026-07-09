@@ -35,7 +35,8 @@ pub fn init() {
 
     // The hardware math subtracts 8 from the user data selector to find the 32-bit base.
 
-    x86_64::registers::model_specific::Star::write(user_code, user_data, kernel_code, kernel_data).expect("FATAL: Invalid segment selectors passed to STAR MSR");
+    x86_64::registers::model_specific::Star::write(user_code, user_data, kernel_code, kernel_data)
+        .expect("FATAL: Invalid segment selectors passed to STAR MSR");
 
     x86_64::registers::model_specific::LStar::write(x86_64::VirtAddr::new(
         syscall_entry_stub as usize as u64,
@@ -52,15 +53,12 @@ core::arch::global_asm!(
     "syscall_entry_stub:",
     // Swap GS to access our PerCpu struct
     "swapgs",
-    
     // Save the dangerous user stack to our scratchpad (Offset 16)
     "mov gs:[16], rsp",
-    
     // Load the safe kernel stack (Offset 8)
     "mov rsp, gs:[8]",
+    // Construct the ThreadContext.
 
-    // Construct the ThreadContext. 
-    
     // Push SS (User Data Segment: Index 4 * 8 | Ring 3 = 0x23)
     "push 0x23",
     // Push RSP (The user stack we saved in the scratchpad)
@@ -73,10 +71,9 @@ core::arch::global_asm!(
     "push rcx",
     // Push a dummy error code to match the struct size
     "push 0",
-
     // Push all General Purpose Registers
     "push rax",
-    "push rcx", 
+    "push rcx",
     "push rdx",
     "push rbx",
     "push rbp",
@@ -85,16 +82,14 @@ core::arch::global_asm!(
     "push r8",
     "push r9",
     "push r10", // Note: Syscalls usually pass the 4th argument in r10, not rcx!
-    "push r11", 
+    "push r11",
     "push r12",
     "push r13",
     "push r14",
     "push r15",
-
     // Call the Rust handler
     "mov rdi, rsp", // Pass the pointer to the ThreadContext as the first argument
     "call rust_syscall_handler",
-
     // Restore the state
     "pop r15",
     "pop r14",
@@ -111,18 +106,14 @@ core::arch::global_asm!(
     "pop rdx",
     "pop rcx",
     "pop rax", // RAX contains the return value of our syscall!
-
     // Pop the dummy error code
     "add rsp, 8",
-    
     // SYSRET requires RIP in RCX, and RFLAGS in R11
-    "pop rcx", // Pop RIP into RCX
+    "pop rcx",    // Pop RIP into RCX
     "add rsp, 8", // Discard CS
-    "pop r11", // Pop RFLAGS into R11
-    
+    "pop r11",    // Pop RFLAGS into R11
     // Restore the user's stack
-    "pop rsp", 
-    
+    "pop rsp",
     // We are now back on the user's stack! We must swap GS back and return immediately.
     "swapgs",
     "sysretq",
@@ -151,7 +142,7 @@ pub extern "C" fn rust_syscall_handler(context: &mut crate::process::process::Th
     let arg2 = context.rsi;
     let arg3 = context.rdx;
     let arg4 = context.r10;
-    let arg5 = context.r8; 
+    let arg5 = context.r8;
     let arg6 = context.r9;
 
     match syscall_no {
@@ -160,21 +151,40 @@ pub extern "C" fn rust_syscall_handler(context: &mut crate::process::process::Th
         // arg2 (rsi) = virtual address of string buffer in user space
         // arg3 (rdx) = length of string
         1 => {
-            let fd = arg1;
+            let fd = arg1 as usize;
             let buf_ptr = arg2 as *const u8;
             let len = arg3 as usize;
 
-            if fd == 1 || fd == 2 {
-                // Read the string safely from user memory
-                // (In a hardened OS, you'd validate that buf_ptr is a valid Ring 3 address first!)
-                let slice = unsafe { core::slice::from_raw_parts(buf_ptr, len) };
-                if let Ok(s) = core::str::from_utf8(slice) {
-                    crate::print!("{}", s);
-                    crate::serial_print!("{}", s);
-                }
-                context.rax = len as u64; // Return number of bytes written
+            if fd >= crate::process::process::MAX_FDS {
+                context.rax = (!(9u64)).wrapping_add(1); // EBADF
             } else {
-                context.rax = (!(9u64)).wrapping_add(1); // -9 (EBADF - Bad File Descriptor)
+                let mut sched = crate::process::process::SCHEDULER.lock();
+                let current_task_id = sched.current_task.expect("FATAL: No current task!");
+
+                let pid = sched.tasks.get_mut(current_task_id).unwrap().pid;
+
+                let process: &crate::process::process::Process =
+                    sched.processes.get(pid as usize).unwrap().as_ref().unwrap();
+
+                let file = process.fd_table[fd as usize].as_ref();
+
+                if let Some(file_arc) = file {
+                    let mut file = file_arc.lock();
+
+                    if file.writable {
+                        let slice = unsafe { core::slice::from_raw_parts(buf_ptr, len) };
+                        if let Some(bytes_written) = file.vnode.write(file.offset, slice) {
+                            file.offset += bytes_written;
+                            context.rax = bytes_written as u64;
+                        } else {
+                            context.rax = (!(9u64)).wrapping_add(1); // EBADF
+                        }
+                    } else {
+                        context.rax = (!(9u64)).wrapping_add(1); // EBADF
+                    }
+                } else {
+                    context.rax = (!(9u64)).wrapping_add(1); // EBADF
+                }
             }
         }
 
@@ -183,28 +193,33 @@ pub extern "C" fn rust_syscall_handler(context: &mut crate::process::process::Th
         60 => {
             let exit_code = arg1;
             crate::serial_println!("User thread exited with code: {}", exit_code);
-            
+
             crate::process::process::exit_thread();
         }
 
         12 => {
             let requested_break = arg1;
-            
+
             let mut sched = crate::process::process::SCHEDULER.lock();
-            
+
             let curent_task_id = sched.current_task.expect("FATAL: No current task!");
-            
+
             let pid = sched.tasks.get_mut(curent_task_id).unwrap().pid;
-            
-            let process: &mut crate::process::process::Process = sched.processes.get_mut(pid as usize).unwrap().as_mut().unwrap();
-            
+
+            let process: &mut crate::process::process::Process = sched
+                .processes
+                .get_mut(pid as usize)
+                .unwrap()
+                .as_mut()
+                .unwrap();
+
             if requested_break == 0 || requested_break < process.heap_start {
                 context.rax = process.program_break;
             } else {
                 process.program_break = requested_break;
                 context.rax = requested_break;
             }
-            
+
             // Step 6: Drop the scheduler lock.
         }
 
@@ -213,5 +228,5 @@ pub extern "C" fn rust_syscall_handler(context: &mut crate::process::process::Th
             crate::serial_println!("Unknown Syscall: {}", syscall_no);
             context.rax = (!(38u64)).wrapping_add(1); // -38 (ENOSYS - Function not implemented)
         }
-    } 
+    }
 }

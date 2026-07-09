@@ -213,3 +213,14 @@ pub struct IoApicRecord {
     pub io_apic_address: u32, // The physical MMIO address!
     pub global_system_interrupt_base: u32,
 }
+
+
+
+/// Multiboot2 Module Tag (Type 3)
+#[repr(C, packed)]
+pub struct ModuleTag {
+    pub typ: u32,
+    pub size: u32,
+    pub mod_start: u32,
+    pub mod_end: u32,
+}

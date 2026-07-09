@@ -97,12 +97,11 @@ extern "x86-interrupt" fn page_fault_handler(
 
     let mut is_user_heap = false;
 
-    {
+    if !is_kernel_heap {
         let mut sched = crate::process::process::SCHEDULER.lock();
         if let Some(tid) = sched.current_task {
             let pid = sched.tasks.get_mut(tid).unwrap().pid;
             if let Some(Some(process)) = sched.processes.get(pid as usize) {
-                // Check if the fault falls within the user's allocated program break
                 if fault_u64 >= process.heap_start && fault_u64 < process.program_break {
                     is_user_heap = true;
                 }

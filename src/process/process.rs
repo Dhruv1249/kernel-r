@@ -57,6 +57,8 @@ pub enum ThreadState {
     Zombie,
 }
 
+pub const MAX_FDS: usize = 3;
+
 /// A kernel process — a container for a page table (address space).
 ///
 /// Currently each process holds exactly one page table (CR3 value).  Threads
@@ -67,6 +69,7 @@ pub struct Process {
     pub page_table: u64,
     pub heap_start: u64,
     pub program_break: u64,
+    pub fd_table: [Option<alloc::sync::Arc<spin::Mutex<crate::fs::vfs::OpenFile>>>; MAX_FDS],
 }
 
 /// A kernel thread — the schedulable unit of execution.
@@ -687,8 +690,6 @@ pub fn join(target_tid: usize) {
 
 /// Spawns a user-mode process in its own isolated address space.
 pub fn spawn_user_process(elf_data: &[u8], weight: u64) -> usize {
-
-
     let elf = xmas_elf::ElfFile::new(elf_data).expect("Failed to parse ELF");
     let entry_point = elf.header.pt2.entry_point();
 
@@ -736,22 +737,32 @@ pub fn spawn_user_process(elf_data: &[u8], weight: u64) -> usize {
                 let frame = crate::mm::memory::allocate_zeroed_frame().expect("OOM");
 
                 crate::mm::paging::map_to(
-                    x86_64::structures::paging::Page::containing_address(x86_64::VirtAddr::new(page_vaddr)),
-                    x86_64::structures::paging::PhysFrame::containing_address(x86_64::PhysAddr::new(frame as u64)),
+                    x86_64::structures::paging::Page::containing_address(x86_64::VirtAddr::new(
+                        page_vaddr,
+                    )),
+                    x86_64::structures::paging::PhysFrame::containing_address(
+                        x86_64::PhysAddr::new(frame as u64),
+                    ),
                     x86_64::structures::paging::PageTableFlags::PRESENT
                         | x86_64::structures::paging::PageTableFlags::WRITABLE
                         | x86_64::structures::paging::PageTableFlags::USER_ACCESSIBLE,
                     user_pml4_table,
-                ).expect("OOM");
+                )
+                .expect("OOM");
 
-                let page_offset = if current_vaddr > page_vaddr { current_vaddr - page_vaddr } else { 0 };
+                let page_offset = if current_vaddr > page_vaddr {
+                    current_vaddr - page_vaddr
+                } else {
+                    0
+                };
                 let bytes_to_copy = core::cmp::min(remaining_file_bytes, 4096 - page_offset);
 
                 if bytes_to_copy > 0 {
                     // Get the virtual pointer to the physical frame via PHYS_OFFSET
-                    let dest_ptr = (frame as u64 + crate::mm::paging::PHYS_OFFSET + page_offset) as *mut u8;
+                    let dest_ptr =
+                        (frame as u64 + crate::mm::paging::PHYS_OFFSET + page_offset) as *mut u8;
                     let src_ptr = unsafe { elf_data.as_ptr().add(current_file_offset as usize) };
-                    
+
                     unsafe {
                         core::ptr::copy_nonoverlapping(src_ptr, dest_ptr, bytes_to_copy as usize);
                     }
@@ -778,16 +789,34 @@ pub fn spawn_user_process(elf_data: &[u8], weight: u64) -> usize {
         user_pml4_table,
     )
     .expect("OOM");
-    let mut sched = SCHEDULER.lock();
 
     let initial_heap_start = crate::mm::allocator::align_to(highest_vaddr as usize, 4096);
+
+    let console_vnode = alloc::sync::Arc::new(crate::fs::vfs::ConsoleVnode);
+
+    let console_file = alloc::sync::Arc::new(spin::Mutex::new(crate::fs::vfs::OpenFile {
+        vnode: console_vnode,
+        offset: 0,
+        readable: true,
+        writable: true,
+    }));
+
+    let mut fd_table: [Option<alloc::sync::Arc<spin::Mutex<crate::fs::vfs::OpenFile>>>; MAX_FDS] =
+        [const { None }; MAX_FDS];
+
+    fd_table[0] = Some(console_file.clone());
+    fd_table[1] = Some(console_file.clone());
+    fd_table[2] = Some(console_file.clone());
+
+    let mut sched = SCHEDULER.lock();
 
     let pid = sched.processes.len() as u64;
     let process = Process {
         pid,
         page_table: user_pml4.as_u64(),
         heap_start: initial_heap_start as u64,
-        program_break: 0,
+        program_break: initial_heap_start as u64,
+        fd_table: fd_table,
     };
 
     sched.processes.push(Some(process));
@@ -799,7 +828,7 @@ pub fn spawn_user_process(elf_data: &[u8], weight: u64) -> usize {
         let context_ptr = thread.stack_pointer as *mut crate::process::process::ThreadContext;
         (*context_ptr).rdi = entry_point;
     }
-    
+
     thread.pid = pid;
 
     let tid = sched.add_task(thread);
@@ -809,7 +838,7 @@ pub fn spawn_user_process(elf_data: &[u8], weight: u64) -> usize {
 /// A tiny kernel thread that drops privileges and jumps to user space.
 pub extern "C" fn user_mode_trampoline(enty_point: u64) {
     let stack_top = 0x8000_0000 + 4096;
-    
+
     unsafe {
         crate::arch::x86_64::gdt::jump_to_user_space(enty_point, stack_top);
     }

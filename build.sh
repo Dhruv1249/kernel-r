@@ -52,8 +52,13 @@ ld.lld -n -T linker.ld -o target/kernel.elf target/boot.o target/target/debug/li
 # Create ISO directory structure
 mkdir -p iso/boot/grub
 
-# Copy kernel ELF
+
+echo "Hello from the virtual filesystem!" > target/test_file.txt
+tar --format=ustar -cf target/initramfs.tar -C target test_file.txt
+
+# Copy kernel ELF and initramfs 
 cp target/kernel.elf iso/boot/kernel.elf
+cp target/initramfs.tar iso/boot/initramfs.tar
 
 # Create GRUB config
 cat >iso/boot/grub/grub.cfg <<EOF
@@ -62,6 +67,7 @@ set default=0
 
 menuentry "kernel-r" {
     multiboot2 /boot/kernel.elf
+    module2 /boot/initramfs.tar
     boot
 }
 EOF

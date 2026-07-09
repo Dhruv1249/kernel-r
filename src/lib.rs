@@ -30,6 +30,7 @@ extern crate alloc;
 pub mod arch;
 pub mod boot;
 pub mod drivers;
+pub mod fs;
 pub mod interrupts;
 pub mod mm;
 pub mod process;
@@ -223,8 +224,20 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
     // ---  FIND THE MADT PHYSICAL ADDRESS ---
     let mut madt_phys_addr: Option<u64> = None;
 
+
+    let mut initramfs_phys_start = 0;
+
     for tag in crate::boot::boot_info::TagIterator::new(multiboot_info_addr) {
         let tag_header = unsafe { &*tag };
+
+
+        if tag_header.typ == 3 {
+            let module_tag = unsafe { &*(tag as *const crate::boot::boot_info::ModuleTag) };
+            let mod_start = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(module_tag.mod_start)) };
+            let mod_end = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(module_tag.mod_end)) };
+            crate::serial_println!("Module found at {:#x} to {:#x}", mod_start, mod_end);
+            initramfs_phys_start = mod_start;
+        }
 
         // ACPI Old RSDP Version 1 (32-bit)
         if tag_header.typ == 14 {
@@ -485,11 +498,24 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
         page_table: kernel_cr3_phys,
         heap_start: 0,
         program_break: 0,
+        fd_table: [const { None }; crate::process::process::MAX_FDS],
     };
+
+    
+    let initramfs_virt_addr = initramfs_phys_start as u64 + crate::mm::paging::PHYS_OFFSET as u64;
+
+    if initramfs_phys_start > 0 {
+        let parsed_fs = crate::fs::tar::parse_tarball(initramfs_virt_addr);
+        *crate::fs::vfs::ROOT_FS.lock() = Some(parsed_fs as alloc::sync::Arc<dyn crate::fs::vfs::Vnode>);
+    } else {
+        crate::serial_println!("WARNING: No Initramfs module found!");
+    }
 
     let mut sched = crate::process::process::SCHEDULER.lock();
 
     sched.processes.push(Some(process_0));
+
+
 
     let idle_task = crate::process::process::Thread::new(
         &mut sched,
