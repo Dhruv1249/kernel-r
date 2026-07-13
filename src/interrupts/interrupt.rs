@@ -111,19 +111,22 @@ extern "x86-interrupt" fn page_fault_handler(
 
 
     if !is_kernel_heap && !is_user_heap {
-        crate::serial_print!(
-            "EXCEPTION: PAGE FAULT\n{:#?}\n Error code: {:#?}",
-            stack_frame,
-            error_code
-        );
-        crate::serial_println!(
-            "EXPECTION: PAGE FAULT: OCCURED AT: {:#x}",
-            fault_addr.as_u64()
-        );
-        println!(
-            "EXCEPTION: PAGE FAULT\n{:#?}\n Error code: {:#?}",
-            stack_frame, error_code
-        );
+        // crate::serial_print!(
+        //     "EXCEPTION: PAGE FAULT\n{:#?}\n Error code: {:#?}",
+        //     stack_frame,
+        //     error_code
+        // );
+        // crate::serial_println!(
+        //     "EXPECTION: PAGE FAULT: OCCURED AT: {:#x}",
+        //     fault_addr.as_u64()
+        // );
+        // println!(
+        //     "EXCEPTION: PAGE FAULT\n{:#?}\n Error code: {:#?}",
+        //     stack_frame, error_code
+        // );
+        crate::serial_println!("EXCEPTION: PAGE FAULT OCCURRED AT: {:#x}", fault_addr.as_u64());
+        crate::serial_println!("Instruction Pointer: {:#x}", stack_frame.instruction_pointer.as_u64());
+        crate::serial_println!("Error code: {:?}", error_code);
         loop {
             x86_64::instructions::hlt();
         }

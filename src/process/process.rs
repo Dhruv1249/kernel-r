@@ -338,8 +338,10 @@ impl Scheduler {
                 if task.state == ThreadState::Zombie {
                     let raw_node = task.rb_node;
                     if !raw_node.is_null() {
-                        // Re-box it and let it immediately go out of scope to free the heap memory!
-                        let _ = unsafe { alloc::boxed::Box::from_raw(raw_node) };
+                        let raw_node = task.rb_node;
+                        if !raw_node.is_null() {
+                            let _ = unsafe { alloc::boxed::Box::from_raw(raw_node) };
+                        }
                     }
                     self.graveyard.push_back(task_idx);
                     task.rb_node = core::ptr::null_mut();
@@ -354,7 +356,9 @@ impl Scheduler {
                     task.burst_score = (task.burst_score + time_consumed) >> 1;
 
                     // Update System Virtual Time (V)
-                    self.system_runtime += (time_consumed << 20) / self.total_weight;
+                    if self.total_weight > 0 {
+                        self.system_runtime += (time_consumed << 20) / self.total_weight;
+                    }
 
                     // Update Thread Deadline
                     task.update_deadline();
@@ -376,7 +380,7 @@ impl Scheduler {
         }
 
         //  Ask the C tree for the node with the lowest vruntime
-        let leftmost_node = unsafe { rbtree_pick_eevdf(self.tree_root) };
+        let leftmost_node = unsafe { rbtree_pick_eevdf(self.tree_root, self.system_runtime) };
 
         if leftmost_node.is_null() {
             if let Some(idle_task_id) = self.idle_task_id {
@@ -844,13 +848,44 @@ pub extern "C" fn user_mode_trampoline(enty_point: u64) {
     }
 }
 
+/// Reads an ELF file from the VFS and spawns it as a new user process.
+pub fn exec_from_vfs(filename: &str, weight: u64) -> Option<usize> {
+    let root_lock = crate::fs::vfs::ROOT_FS.lock();
+
+    if let Some(root_dir) = root_lock.as_ref() {
+        if let Some(file) = root_dir.lookup(filename) {
+            let file_size: usize = file.size();
+            let mut buffer = alloc::vec![0; file_size];
+
+            let read_size = file.read(0, &mut buffer);
+
+            drop(root_lock);
+
+            if read_size.is_none() {
+                return None;
+            }
+
+            return Some(crate::process::process::spawn_user_process(&buffer, weight));
+        }
+    }
+
+    None
+}
+
 // Global asm so rust knows how to call this function and doesn't mess with the stack
 core::arch::global_asm!(
     // ISR -> Interrupt Service Routine
     ".global timer_isr",
     "timer_isr:",
+    // The CPU pushed SS, RSP, RFLAGS, CS, RIP.
+    // CS is 8 bytes down from the top of the stack (rsp + 8).
+    // Test if the lowest 2 bits of CS are 3 (Ring 3).
+    "test qword ptr [rsp + 8], 3",
+    "jz .L_kernel_interrupt", // If 0, we interrupted Ring 0. Skip swapgs.
+    "swapgs",                 // If 3, we interrupted Ring 3. Swap to Kernel GS!
     // Cpu just pushed ss, rsp, rflags, cs, rip
     // Push error code
+    ".L_kernel_interrupt:",
     "push 0",
     // Push general purpose registers
     "push rax",
@@ -891,6 +926,11 @@ core::arch::global_asm!(
     "pop rax",
     // Pop the error code
     "add rsp, 8",
+    // Check again before we return: are we returning to Ring 3?
+    "test qword ptr [rsp + 8], 3",
+    "jz .L_return_kernel",
+    "swapgs", // If returning to Ring 3, swap back to User GS!
+    ".L_return_kernel:",
     // Hardware return (tells CPU to pop the ss, rsp, rflags, cs, rip)
     "iretq",
 );
@@ -909,7 +949,7 @@ pub struct SchedNode {
 // Define the FFI bindings
 unsafe extern "C" {
     pub fn rbtree_insert(root: *mut *mut SchedNode, new_node: *mut SchedNode);
-    pub fn rbtree_pick_eevdf(root: *mut SchedNode) -> *mut SchedNode;
+    pub fn rbtree_pick_eevdf(root: *mut SchedNode, system_vruntime: u64) -> *mut SchedNode;
     pub fn rbtree_remove(root: *mut *mut SchedNode, node: *mut SchedNode);
 }
 
@@ -927,16 +967,6 @@ pub extern "C" fn task_a() {
         unsafe {
             crate::arch::x86_64::gdt::jump_to_user_space(code, stack);
         }
-
-        // if let Some(key) = crate::drivers::keyboard::KEYBOARD_MAILBOX.receive() {
-        //     match key {
-        //         pc_keyboard::DecodedKey::Unicode(character) => {
-        //             crate::print!("{}", character);
-        //             crate::serial_print!("{}", character);
-        //         }
-        //         pc_keyboard::DecodedKey::RawKey(_key) => continue,
-        //     }
-        // }
     }
 }
 

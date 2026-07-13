@@ -37,6 +37,7 @@ nasm -f elf64 src/boot.asm -o target/boot.o
 # -ffreestanding: No standard library
 # -mno-red-zone: CRITICAL for kernel code to prevent hardware interrupts from trashing the stack
 clang -target x86_64-unknown-none -ffreestanding -mno-red-zone -c src/rbtree.c -o target/rbtree.o
+clang -target x86_64-unknown-none -ffreestanding -nostdlib -static src/dummy.c -o target/dummy.elf
 
 # Build the kernel
 if [ "$istest" -eq 1 ]; then
@@ -55,6 +56,7 @@ mkdir -p iso/boot/grub
 
 echo "Hello from the virtual filesystem!" > target/test_file.txt
 tar --format=ustar -cf target/initramfs.tar -C target test_file.txt
+tar --format=ustar -cf target/initramfs.tar -C target dummy.elf
 
 # Copy kernel ELF and initramfs 
 cp target/kernel.elf iso/boot/kernel.elf

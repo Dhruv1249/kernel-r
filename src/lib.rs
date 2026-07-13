@@ -150,12 +150,20 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
 
     let tag_iter = crate::boot::boot_info::TagIterator::new(multiboot_info_addr);
     let mut tag_option: Option<*const TagHeader> = None;
+    let mut initramfs_phys_start = 0;
 
     for tags in tag_iter {
         let tag_header = unsafe { &*tags };
 
         if tag_header.typ == 6 {
             tag_option = Some(tags);
+        } else if tag_header.typ == 3 {
+            let module_tag = unsafe { &*(tags as *const crate::boot::boot_info::ModuleTag) };
+            let mod_start = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(module_tag.mod_start)) };
+            let mod_end = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(module_tag.mod_end)) };
+            
+            initramfs_phys_start = mod_start;
+            crate::mm::memory::reserve_region(mod_start as usize, mod_end as usize, "Initramfs Module");
         }
     }
 
@@ -225,19 +233,8 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
     let mut madt_phys_addr: Option<u64> = None;
 
 
-    let mut initramfs_phys_start = 0;
-
     for tag in crate::boot::boot_info::TagIterator::new(multiboot_info_addr) {
         let tag_header = unsafe { &*tag };
-
-
-        if tag_header.typ == 3 {
-            let module_tag = unsafe { &*(tag as *const crate::boot::boot_info::ModuleTag) };
-            let mod_start = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(module_tag.mod_start)) };
-            let mod_end = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(module_tag.mod_end)) };
-            crate::serial_println!("Module found at {:#x} to {:#x}", mod_start, mod_end);
-            initramfs_phys_start = mod_start;
-        }
 
         // ACPI Old RSDP Version 1 (32-bit)
         if tag_header.typ == 14 {
@@ -501,12 +498,12 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
         fd_table: [const { None }; crate::process::process::MAX_FDS],
     };
 
-    
     let initramfs_virt_addr = initramfs_phys_start as u64 + crate::mm::paging::PHYS_OFFSET as u64;
 
     if initramfs_phys_start > 0 {
         let parsed_fs = crate::fs::tar::parse_tarball(initramfs_virt_addr);
-        *crate::fs::vfs::ROOT_FS.lock() = Some(parsed_fs as alloc::sync::Arc<dyn crate::fs::vfs::Vnode>);
+        *crate::fs::vfs::ROOT_FS.lock() =
+            Some(parsed_fs as alloc::sync::Arc<dyn crate::fs::vfs::Vnode>);
     } else {
         crate::serial_println!("WARNING: No Initramfs module found!");
     }
@@ -514,8 +511,6 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
     let mut sched = crate::process::process::SCHEDULER.lock();
 
     sched.processes.push(Some(process_0));
-
-
 
     let idle_task = crate::process::process::Thread::new(
         &mut sched,
@@ -525,21 +520,37 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
 
     sched.set_idle_task(idle_task);
     drop(sched);
-    #[repr(C, align(8))]
-    struct AlignedElf(
-        [u8; include_bytes!("../../dummy_elf/target/x86_64-unknown-none/release/dummy_elf").len()],
-    );
-
+    // #[repr(C, align(8))]
+    // struct AlignedElf(
+    //     [u8; include_bytes!("../../dummy_elf/target/x86_64-unknown-none/release/dummy_elf").len()],
+    // );
+    //
     // Embed the file into the kernel's .rodata section, properly aligned
-    static ELF_DATA: AlignedElf = AlignedElf(*include_bytes!(
-        "../../dummy_elf/target/x86_64-unknown-none/release/dummy_elf"
-    ));
-
-    crate::serial_println!("Spawning ELF Ring 3 user process...");
-    crate::process::process::spawn_user_process(&ELF_DATA.0, 1024);
-
+    // static ELF_DATA: AlignedElf = AlignedElf(*include_bytes!(
+    //     "../../dummy_elf/target/x86_64-unknown-none/release/dummy_elf"
+    // ));
+    //
+    // crate::serial_println!("Spawning ELF Ring 3 user process...");
+    // crate::process::process::spawn_user_process(&ELF_DATA.0, 1024);
+    // crate::process::process::exec_from_vfs("dummy.elf", 1024);
+    //
     // crate::process::process::spawn(crate::process::process::task_a, 1024);
     // crate::process::process::spawn(crate::process::process::task_b, 1024);
+
+    crate::serial_println!("--- INITIATING STRESS TEST ---");
+
+    // 1. Spawn 200 independent user processes
+    for i in 0..200 {
+        crate::process::process::exec_from_vfs("dummy.elf", 1024);
+    }
+    crate::serial_println!("Spawned 20 user processes.");
+
+    // 2. Spawn 200 background kernel threads doing nothing but HLT
+    for i in 0..200 {
+        crate::process::process::spawn(crate::process::process::task_b, 1024);
+    }
+    crate::serial_println!("Spawned 200 kernel threads.");
+    crate::serial_println!("--- STRESS TEST LIVE ---");
 
     // Disable the legacy PIC
     // Since its hardware timer is mapped to IRQ 0, which is mapped to Vector 8
