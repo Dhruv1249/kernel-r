@@ -295,6 +295,8 @@ impl BuddyAllocator {
     /// The XOR trick `addr ^ size` computes the buddy address because buddies
     /// are always aligned to `2 × size` and differ only in bit `log2(size)`.
     pub fn free(&mut self, mut addr: usize, mut order: usize) {
+        // Unconditionally strip the lower 12 bits (hardware flags) to ensure perfect 4KB alignment.
+        addr &= !0xFFF;
         order = core::cmp::min(order, MAX_ORDER - 1);
 
         while order < MAX_ORDER - 1 {
@@ -351,6 +353,29 @@ impl BuddyAllocator {
                 (*(*block).next).prev = (*block).prev;
             }
         }
+    }
+
+
+    /// Walks the internal free lists and aggregates total available bytes.
+    pub fn count_free_memory(&self) -> usize {
+        let mut total_free = 0;
+
+        for order in 0..MAX_ORDER {
+            let mut curr = self.free_list[order];
+            let mut block_count = 0;
+
+            while !curr.is_null() {
+                block_count += 1;
+                unsafe {
+                    curr = (*curr).next;
+                }
+            }
+            
+            // Order 0 = 4096 << 0 (4KB), Order 1 = 4096 << 1 (8KB), etc.
+            total_free += block_count * (4096 << order);
+        }
+
+        total_free
     }
 }
 

@@ -96,21 +96,31 @@ extern "x86-interrupt" fn page_fault_handler(
     let is_kernel_heap = fault_u64 >= heap_start && fault_u64 < heap_start + heap_size;
 
     let mut is_user_heap = false;
+    let mut is_user_stack = false;
 
     if !is_kernel_heap {
-        let mut sched = crate::process::process::SCHEDULER.lock();
-        if let Some(tid) = sched.current_task {
-            let pid = sched.tasks.get_mut(tid).unwrap().pid;
-            if let Some(Some(process)) = sched.processes.get(pid as usize) {
-                if fault_u64 >= process.heap_start && fault_u64 < process.program_break {
-                    is_user_heap = true;
-                }
-            }
+        use core::sync::atomic::Ordering;
+        let heap_start = crate::process::process::CURRENT_BOUNDS
+            .heap_start
+            .load(Ordering::Relaxed);
+        let program_break = crate::process::process::CURRENT_BOUNDS
+            .program_break
+            .load(Ordering::Relaxed);
+        let stack_start = crate::process::process::CURRENT_BOUNDS
+            .stack_start
+            .load(Ordering::Relaxed);
+        let stack_end = crate::process::process::CURRENT_BOUNDS
+            .stack_end
+            .load(Ordering::Relaxed);
+
+        if fault_u64 >= heap_start && fault_u64 < program_break {
+            is_user_heap = true;
+        } else if fault_u64 >= stack_start && fault_u64 < stack_end {
+            is_user_stack = true;
         }
     }
 
-
-    if !is_kernel_heap && !is_user_heap {
+    if !is_kernel_heap && !is_user_heap && !is_user_stack {
         // crate::serial_print!(
         //     "EXCEPTION: PAGE FAULT\n{:#?}\n Error code: {:#?}",
         //     stack_frame,
@@ -124,8 +134,14 @@ extern "x86-interrupt" fn page_fault_handler(
         //     "EXCEPTION: PAGE FAULT\n{:#?}\n Error code: {:#?}",
         //     stack_frame, error_code
         // );
-        crate::serial_println!("EXCEPTION: PAGE FAULT OCCURRED AT: {:#x}", fault_addr.as_u64());
-        crate::serial_println!("Instruction Pointer: {:#x}", stack_frame.instruction_pointer.as_u64());
+        crate::serial_println!(
+            "EXCEPTION: PAGE FAULT OCCURRED AT: {:#x}",
+            fault_addr.as_u64()
+        );
+        crate::serial_println!(
+            "Instruction Pointer: {:#x}",
+            stack_frame.instruction_pointer.as_u64()
+        );
         crate::serial_println!("Error code: {:?}", error_code);
         loop {
             x86_64::instructions::hlt();
@@ -152,7 +168,7 @@ extern "x86-interrupt" fn page_fault_handler(
         | x86_64::structures::paging::PageTableFlags::WRITABLE
         | x86_64::structures::paging::PageTableFlags::NO_EXECUTE;
 
-    if is_user_heap {
+    if is_user_heap || is_user_stack {
         flags |= x86_64::structures::paging::PageTableFlags::USER_ACCESSIBLE;
     }
 
@@ -186,12 +202,17 @@ extern "x86-interrupt" fn double_fault_handler(
     stack_frame: InterruptStackFrame,
     _error_code: u64,
 ) -> ! {
-
     let mut serial_port = unsafe { uart_16550::SerialPort::new(0x3F8) };
     use core::fmt::Write;
-    let _ = writeln!(serial_port, "FATAL: DOUBLE FAULT AT {:#x}", stack_frame.instruction_pointer);
-    panic!("FATAL: DOUBLE FAULT AT {:#x}", stack_frame.instruction_pointer);
-
+    let _ = writeln!(
+        serial_port,
+        "FATAL: DOUBLE FAULT AT {:#x}",
+        stack_frame.instruction_pointer
+    );
+    panic!(
+        "FATAL: DOUBLE FAULT AT {:#x}",
+        stack_frame.instruction_pointer
+    );
 }
 
 unsafe extern "C" {

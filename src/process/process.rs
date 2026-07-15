@@ -69,6 +69,8 @@ pub struct Process {
     pub page_table: u64,
     pub heap_start: u64,
     pub program_break: u64,
+    pub stack_start: u64,
+    pub stack_end: u64,
     pub fd_table: [Option<alloc::sync::Arc<spin::Mutex<crate::fs::vfs::OpenFile>>>; MAX_FDS],
 }
 
@@ -114,7 +116,7 @@ pub struct Thread {
 /// linked into the arena's free list.
 pub enum ThreadSlot {
     Empty { next_free: Option<usize> },
-    Occupied(Thread),
+    Occupied(alloc::boxed::Box<Thread>),
 }
 
 /// A slab-style arena for kernel threads with O(1) insert, remove, and lookup.
@@ -145,7 +147,7 @@ impl ThreadArena {
             // Fast Path: Reuse a dead task's slot in O(1) time
             if let ThreadSlot::Empty { next_free } = self.slots[idx] {
                 self.free_head = next_free;
-                self.slots[idx] = ThreadSlot::Occupied(task);
+                self.slots[idx] = ThreadSlot::Occupied(alloc::boxed::Box::new(task));
                 return idx;
             } else {
                 panic!("FATAL: ThreadArena free list corrupted");
@@ -153,7 +155,8 @@ impl ThreadArena {
         } else {
             // Slow Path: Array is full, push a new slot
             let idx = self.slots.len();
-            self.slots.push(ThreadSlot::Occupied(task));
+            self.slots
+                .push(ThreadSlot::Occupied(alloc::boxed::Box::new(task)));
             idx
         }
     }
@@ -175,7 +178,7 @@ impl ThreadArena {
         match slot {
             ThreadSlot::Occupied(task) => {
                 self.free_head = Some(pid); // Wire the free-list to this newly freed slot
-                Some(task)
+                Some(*task)
             }
             ThreadSlot::Empty { .. } => {
                 // It was already empty. Revert the swap and return None.
@@ -188,7 +191,7 @@ impl ThreadArena {
     /// Safely fetch a mutable reference to a task by ID
     pub fn get_mut(&mut self, pid: usize) -> Option<&mut Thread> {
         if let Some(ThreadSlot::Occupied(task)) = self.slots.get_mut(pid) {
-            Some(task)
+            Some(&mut *task)
         } else {
             None
         }
@@ -244,6 +247,47 @@ pub unsafe extern "C" fn idle_task() {
     }
 }
 
+use core::sync::atomic::{AtomicU64, Ordering};
+
+/// Lock-free snapshot of the *currently running* process's memory bounds.
+///
+/// Updated by the scheduler on every context switch and by the `brk` syscall.
+/// The page fault handler reads this instead of taking `SCHEDULER.lock()`.
+///
+/// This exists because a page fault is a synchronous CPU exception, not a
+/// maskable interrupt — it can fire in the middle of a `SCHEDULER.lock()`
+/// critical section (e.g. while `add_task` is allocating a `Box`), and a
+/// spin::Mutex is not reentrant. Locking SCHEDULER again from inside the
+/// fault handler deadlocks the core solid.
+pub struct CurrentBounds {
+    pub heap_start: AtomicU64,
+    pub program_break: AtomicU64,
+    pub stack_start: AtomicU64,
+    pub stack_end: AtomicU64,
+}
+
+impl CurrentBounds {
+    const fn new() -> Self {
+        Self {
+            heap_start: AtomicU64::new(0),
+            program_break: AtomicU64::new(0),
+            stack_start: AtomicU64::new(0),
+            stack_end: AtomicU64::new(0),
+        }
+    }
+
+    pub fn update(&self, process: &Process) {
+        self.heap_start.store(process.heap_start, Ordering::Relaxed);
+        self.program_break
+            .store(process.program_break, Ordering::Relaxed);
+        self.stack_start
+            .store(process.stack_start, Ordering::Relaxed);
+        self.stack_end.store(process.stack_end, Ordering::Relaxed);
+    }
+}
+
+pub static CURRENT_BOUNDS: CurrentBounds = CurrentBounds::new();
+
 /// The global EEVDF + BORE scheduler instance.
 ///
 /// All scheduling operations (task insertion, context-switch decisions, task
@@ -251,7 +295,7 @@ pub unsafe extern "C" fn idle_task() {
 /// [`crate::mm::allocator::Locked`] so that both normal kernel code and the
 /// timer ISR can safely access it with interrupt-safe locking.
 pub struct Scheduler {
-    pub processes: alloc::vec::Vec<Option<Process>>,
+    pub processes: alloc::vec::Vec<Option<alloc::boxed::Box<Process>>>,
     pub tasks: ThreadArena,
     pub total_weight: u64,
     pub system_runtime: u64, // Global virtual clock
@@ -283,7 +327,13 @@ impl Scheduler {
         for _i in 0..len {
             let zombie_id = self.graveyard.pop_front();
             if zombie_id != self.current_task {
-                self.tasks.remove(zombie_id.unwrap());
+                if let Some(dead_thread) = self.tasks.remove(zombie_id.unwrap()) {
+                    let pid = dead_thread.pid as usize;
+                    if let Some(process_box) = self.processes[pid].take() {
+                        let pml4_phys = process_box.page_table;
+                        crate::mm::paging::destroy_user_address_space(pml4_phys);
+                    }
+                }
             } else {
                 self.graveyard.push_back(zombie_id.unwrap());
             }
@@ -387,6 +437,9 @@ impl Scheduler {
                 // Update current_task so we don't accidentally save the idle task's context over a real task next tick
                 self.current_task = Some(idle_task_id);
                 let task = self.tasks.get_mut(idle_task_id).unwrap();
+                if let Some(Some(process)) = self.processes.get(task.pid as usize) {
+                    CURRENT_BOUNDS.update(process);
+                }
                 unsafe {
                     crate::arch::x86_64::cpu::PER_CPU_0.kernel_rsp =
                         task.stack.as_ptr() as u64 + task.stack.len() as u64;
@@ -414,8 +467,12 @@ impl Scheduler {
 
         let next_pid = self.tasks.get_mut(winner_idx).unwrap().pid;
 
+        if let Some(Some(process)) = self.processes.get(next_pid as usize) {
+            CURRENT_BOUNDS.update(process);
+        }
+
         if prev_pid as u64 != next_pid {
-            let slot: &Option<Process> = &self.processes[next_pid as usize];
+            let slot = &self.processes[next_pid as usize];
             let process: &Process = slot.as_ref().expect("...");
 
             let phys_addr = process.page_table;
@@ -484,7 +541,8 @@ impl Scheduler {
     }
 }
 
-const TASK_STACK_SIZE: usize = 0x400 * 16; // 16 KB
+const KERNEL_STACK_SIZE: usize = 0x400 * 128; // 64 KB
+const USER_STACK_SIZE: usize = 0x400000; // 4 MB
 const SCHEDULER_TARGET_LATENCY: u64 = 6 * 1_000_000; // 6 ms Defaul in Linux
 const SCHEDULER_MIN_GRANULARITY: u64 = 4 * 1_000_000; // 4 ms Default in Linux
 const NICE_0_LOAD: u64 = 1024; // Value base Nice
@@ -492,11 +550,11 @@ const NICE_0_LOAD: u64 = 1024; // Value base Nice
 impl Thread {
     pub fn new(scheduler: &mut Scheduler, entry_point: u64, weight: u64) -> Self {
         // Allocte memory for the stack
-        let mut stack = alloc::vec![0; TASK_STACK_SIZE];
+        let mut stack = alloc::vec![0; KERNEL_STACK_SIZE];
 
         // Get the highest stack address
         let stack_start = stack.as_mut_ptr() as u64;
-        let stack_end = stack_start + TASK_STACK_SIZE as u64;
+        let stack_end = stack_start + KERNEL_STACK_SIZE as u64;
 
         let return_addr_ptr = stack_end - 8;
 
@@ -703,19 +761,8 @@ pub fn spawn_user_process(elf_data: &[u8], weight: u64) -> usize {
     let user_pml4_table =
         unsafe { &mut *(virt_addr.as_mut_ptr() as *mut x86_64::structures::paging::PageTable) };
 
-    let code_frame = crate::mm::memory::allocate_frame().expect("OOM");
-
-    crate::mm::paging::map_to(
-        x86_64::structures::paging::Page::containing_address(x86_64::VirtAddr::new(0x4000_0000)),
-        x86_64::structures::paging::PhysFrame::containing_address(x86_64::PhysAddr::new(
-            code_frame as u64,
-        )),
-        x86_64::structures::paging::PageTableFlags::PRESENT
-            | x86_64::structures::paging::PageTableFlags::WRITABLE
-            | x86_64::structures::paging::PageTableFlags::USER_ACCESSIBLE,
-        user_pml4_table,
-    )
-    .expect("OOM");
+    let stack_top = 0x8000_0000u64;
+    let stack_bottom = stack_top - USER_STACK_SIZE as u64;
 
     let mut highest_vaddr: u64 = 0;
 
@@ -819,11 +866,13 @@ pub fn spawn_user_process(elf_data: &[u8], weight: u64) -> usize {
         pid,
         page_table: user_pml4.as_u64(),
         heap_start: initial_heap_start as u64,
+        stack_start: stack_bottom,
+        stack_end: stack_top,
         program_break: initial_heap_start as u64,
         fd_table: fd_table,
     };
 
-    sched.processes.push(Some(process));
+    sched.processes.push(Some(alloc::boxed::Box::new(process)));
 
     let mut thread =
         crate::process::process::Thread::new(&mut sched, user_mode_trampoline as u64, weight);
@@ -841,7 +890,7 @@ pub fn spawn_user_process(elf_data: &[u8], weight: u64) -> usize {
 
 /// A tiny kernel thread that drops privileges and jumps to user space.
 pub extern "C" fn user_mode_trampoline(enty_point: u64) {
-    let stack_top = 0x8000_0000 + 4096;
+    let stack_top = 0x8000_0000;
 
     unsafe {
         crate::arch::x86_64::gdt::jump_to_user_space(enty_point, stack_top);

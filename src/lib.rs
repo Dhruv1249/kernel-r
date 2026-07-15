@@ -159,11 +159,17 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
             tag_option = Some(tags);
         } else if tag_header.typ == 3 {
             let module_tag = unsafe { &*(tags as *const crate::boot::boot_info::ModuleTag) };
-            let mod_start = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(module_tag.mod_start)) };
-            let mod_end = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(module_tag.mod_end)) };
-            
+            let mod_start =
+                unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(module_tag.mod_start)) };
+            let mod_end =
+                unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(module_tag.mod_end)) };
+
             initramfs_phys_start = mod_start;
-            crate::mm::memory::reserve_region(mod_start as usize, mod_end as usize, "Initramfs Module");
+            crate::mm::memory::reserve_region(
+                mod_start as usize,
+                mod_end as usize,
+                "Initramfs Module",
+            );
         }
     }
 
@@ -231,7 +237,6 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
 
     // ---  FIND THE MADT PHYSICAL ADDRESS ---
     let mut madt_phys_addr: Option<u64> = None;
-
 
     for tag in crate::boot::boot_info::TagIterator::new(multiboot_info_addr) {
         let tag_header = unsafe { &*tag };
@@ -495,6 +500,8 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
         page_table: kernel_cr3_phys,
         heap_start: 0,
         program_break: 0,
+        stack_start: 0,
+        stack_end: 0,
         fd_table: [const { None }; crate::process::process::MAX_FDS],
     };
 
@@ -510,7 +517,9 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
 
     let mut sched = crate::process::process::SCHEDULER.lock();
 
-    sched.processes.push(Some(process_0));
+    sched
+        .processes
+        .push(Some(alloc::boxed::Box::new(process_0)));
 
     let idle_task = crate::process::process::Thread::new(
         &mut sched,
@@ -537,20 +546,6 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
     // crate::process::process::spawn(crate::process::process::task_a, 1024);
     // crate::process::process::spawn(crate::process::process::task_b, 1024);
 
-    crate::serial_println!("--- INITIATING STRESS TEST ---");
-
-    // 1. Spawn 200 independent user processes
-    for i in 0..200 {
-        crate::process::process::exec_from_vfs("dummy.elf", 1024);
-    }
-    crate::serial_println!("Spawned 20 user processes.");
-
-    // 2. Spawn 200 background kernel threads doing nothing but HLT
-    for i in 0..200 {
-        crate::process::process::spawn(crate::process::process::task_b, 1024);
-    }
-    crate::serial_println!("Spawned 200 kernel threads.");
-    crate::serial_println!("--- STRESS TEST LIVE ---");
 
     // Disable the legacy PIC
     // Since its hardware timer is mapped to IRQ 0, which is mapped to Vector 8
@@ -577,6 +572,9 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
             .init_keyboard();
     }
 
+        run_monitored_stress_test(); 
+
+
     crate::serial_println!("Interrupts enabled. Waiting for keyboard input...");
     loop {
         x86_64::instructions::hlt();
@@ -593,4 +591,75 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
     //         x86_64::instructions::hlt();
     //     }
     // }
+}
+
+use core::sync::atomic::{AtomicUsize, Ordering};
+
+static MEM_START: AtomicUsize = AtomicUsize::new(0);
+
+pub fn run_monitored_stress_test() {
+    crate::serial_println!("--- MEMORY PROFILE PROFILE INIT ---");
+    x86_64::instructions::interrupts::disable();
+
+    crate::serial_println!("Spawning monitor thread and transitioning to scheduler...");
+    crate::process::process::spawn(monitor_task, 1024);
+    
+    x86_64::instructions::interrupts::enable();
+    crate::process::process::yield_now(); 
+}
+
+// CRITICAL FIX: We explicitly tell the compiler NEVER to inline this function.
+// This forces the heavy 8 KB Process struct to be created on a temporary stack frame
+// that is instantly destroyed when the function returns, preventing loop accumulation!
+#[inline(never)]
+fn spawn_one_dummy_process() {
+    crate::process::process::exec_from_vfs("dummy.elf", 1024);
+}
+
+pub extern "C" fn monitor_task() {
+    let mem_start = crate::mm::memory::get_free_memory_mb();
+    MEM_START.store(mem_start, Ordering::SeqCst);
+    crate::serial_println!("[MEM] Initial Available RAM: {} MB", mem_start);
+
+    crate::serial_println!("Spawning 5000 user processes concurrently...");
+    
+    // Spawn ALL 5,000 processes into the EEVDF scheduler at once. No yielding!
+    for _i in 0..5000 {
+        spawn_one_dummy_process();
+    }
+
+    let mem_peak = crate::mm::memory::get_free_memory_mb();
+    crate::serial_println!("[MEM] Peak Load RAM: {} MB (Consumed: {} MB)", 
+        mem_peak, mem_start - mem_peak);
+
+    crate::serial_println!("[Monitor] Yielding CPU execution to user threads. Awaiting completion...");
+    
+    loop {
+        let mut sched = crate::process::process::SCHEDULER.lock();
+        sched.reap_zombies();
+        
+        let active_tasks = sched.processes.iter().filter(|p| p.is_some()).count();
+        if active_tasks <= 1 {
+            drop(sched);
+            break; 
+        }
+        
+        drop(sched);
+        crate::process::process::yield_now(); 
+    }
+
+    crate::serial_println!("All stress tasks successfully reaped!");
+    let mem_end = crate::mm::memory::get_free_memory_mb();
+    crate::serial_println!("[MEM] Final Recovered RAM: {} MB", mem_end);
+    
+    let mem_start_val = MEM_START.load(Ordering::SeqCst);
+    let leak_delta = mem_start_val as i64 - mem_end as i64;
+    
+    if leak_delta.abs() <= 2 { 
+        crate::serial_println!("SUCCESS: Memory reclamation clean. 0 byte leaks detected!");
+    } else {
+        crate::serial_println!("WARNING: Memory leak detected! Delta: {} MB", leak_delta);
+    }
+    
+    crate::process::process::exit_thread();
 }

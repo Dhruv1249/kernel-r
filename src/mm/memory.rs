@@ -16,11 +16,11 @@ pub static FRAME_ALLOCATOR: crate::mm::allocator::Locked<crate::mm::buddy::Buddy
 /// by the page-fault handler in `interrupts::interrupt`.
 pub const HEAP_START: usize = 0xFFFF_9000_0000_0000;
 
-/// Size of the kernel heap in bytes (10 MiB).
+/// Size of the kernel heap in bytes (10 TiB).
 ///
 /// The heap spans `[HEAP_START, HEAP_START + HEAP_SIZE)`.  Pages are only
 /// physically backed when first written (demand paging).
-pub const HEAP_SIZE: usize = 0xA00000; // 10 MB
+pub const HEAP_SIZE: usize = 0xA00_0000_0000; // 10 TB
 
 /// A record of one physical memory region that must not be handed to the frame allocator.
 ///
@@ -315,6 +315,14 @@ pub fn init_physical_memory(
         "Physical Buddy Allocator Live! Managing {} MB of Free RAM",
         (free_frames * 4096) / 1024 / 1024
     );
+}
+
+
+
+/// Public API to grab total free physical RAM in Megabytes
+pub fn get_free_memory_mb() -> usize {
+    let allocator = FRAME_ALLOCATOR.lock();
+    allocator.count_free_memory() / (1024 * 1024)
 }
 
 /// Initialises the kernel heap virtual-address window.

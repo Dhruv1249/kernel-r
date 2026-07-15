@@ -319,8 +319,10 @@ pub extern "C" fn rust_syscall_handler(context: &mut crate::process::process::Th
             } else {
                 process.program_break = requested_break;
                 context.rax = requested_break;
+                crate::process::process::CURRENT_BOUNDS
+                    .program_break
+                    .store(requested_break, core::sync::atomic::Ordering::Relaxed);
             }
-
         }
 
         // Unknown Syscall

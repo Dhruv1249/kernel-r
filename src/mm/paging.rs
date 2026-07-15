@@ -450,3 +450,59 @@ pub fn create_user_address_space() -> Option<x86_64::PhysAddr> {
     
     Some(x86_64::PhysAddr::new(frame as u64))
 }
+
+
+/// Walks the user half of the PML4 and frees every physical frame mapped, 
+/// followed by the page table structures themselves.
+pub fn destroy_user_address_space(pml4_phys: u64) {
+    let pml4_vaddr = pml4_phys + crate::mm::paging::PHYS_OFFSET;
+    let pml4 = unsafe { &mut *(pml4_vaddr as *mut PageTable) };
+
+    // Loop ONLY through user space (entries 0 to 255). 
+    // We do NOT touch 256-511, as those are shared kernel mappings!
+    for i in 0..256 {
+        let pml4_entry = &mut pml4[i];
+        if pml4_entry.flags().contains(PageTableFlags::PRESENT) {
+            let pdpt_phys = pml4_entry.addr().as_u64();
+            let pdpt_vaddr = pdpt_phys + crate::mm::paging::PHYS_OFFSET;
+            let pdpt = unsafe { &mut *(pdpt_vaddr as *mut PageTable) };
+
+            for j in 0..512 {
+                let pdpt_entry = &mut pdpt[j];
+                if pdpt_entry.flags().contains(PageTableFlags::PRESENT) {
+                    let pd_phys = pdpt_entry.addr().as_u64();
+                    let pd_vaddr = pd_phys + crate::mm::paging::PHYS_OFFSET;
+                    let pd = unsafe { &mut *(pd_vaddr as *mut PageTable) };
+
+                    for k in 0..512 {
+                        let pd_entry = &mut pd[k];
+                        if pd_entry.flags().contains(PageTableFlags::PRESENT) {
+                            let pt_phys = pd_entry.addr().as_u64();
+                            let pt_vaddr = pt_phys + crate::mm::paging::PHYS_OFFSET;
+                            let pt = unsafe { &mut *(pt_vaddr as *mut PageTable) };
+
+                            for l in 0..512 {
+                                let pt_entry = &mut pt[l];
+                                if pt_entry.flags().contains(PageTableFlags::PRESENT) {
+                                    let frame_phys = pt_entry.addr().as_u64();
+                                    pt_entry.set_unused();
+                                    // Free the actual mapped memory (Code, Data, Stack)
+                                    crate::mm::memory::clear_frame(frame_phys as usize);
+                                }
+                            }
+                            // Free the Page Table (PT)
+                            crate::mm::memory::clear_frame(pt_phys as usize);
+                        }
+                    }
+                    // Free the Page Directory (PD)
+                    crate::mm::memory::clear_frame(pd_phys as usize);
+                }
+            }
+            // Free the Page Directory Pointer Table (PDPT)
+            crate::mm::memory::clear_frame(pdpt_phys as usize);
+        }
+    }
+    // Finally, free the PML4 itself
+    crate::mm::memory::clear_frame(pml4_phys as usize);
+    x86_64::instructions::tlb::flush_all();
+}
