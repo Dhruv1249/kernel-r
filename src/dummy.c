@@ -30,6 +30,18 @@ void _start() {
 
     const char* str = "Hello from Ring 3 C! From inside the intiramfs tarball elf\n";
     syscall3(1, 1, (u64)str, 59);
+    u64 initial_break = syscall1(12,0);
+    u64 target_break = initial_break + 8192;
+    syscall3(12, target_break, 0, 0);
+    volatile u64* ptr = (volatile u64*)initial_break;
+    ptr[0] = 0x1122334455667788ULL;
+    ((volatile u64*)(initial_break + 4096))[0] = 0xAABBCCDDEEFF0011ULL;
+    if (ptr[0] != 0x1122334455667788ULL || 
+        ((volatile u64*)(initial_break + 4096))[0] != 0xAABBCCDDEEFF0011ULL) {
+        syscall3(1, 1, (u64)"Data corruption detected!\n", 32);
+        syscall1(60, 0);
+    }
+    syscall3(12, initial_break, 0, 0);
+    syscall3(1, 1, (u64)"SUCCESS: NO Data corruption detected!\n", 32);
     syscall1(60, 0);
-    while (1) {}
 }

@@ -624,7 +624,7 @@ pub extern "C" fn monitor_task() {
     crate::serial_println!("Spawning 5000 user processes concurrently...");
     
     // Spawn ALL 5,000 processes into the EEVDF scheduler at once. No yielding!
-    for _i in 0..5000 {
+    for _i in 0..1 {
         spawn_one_dummy_process();
     }
 

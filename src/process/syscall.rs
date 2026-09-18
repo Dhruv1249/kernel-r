@@ -1,5 +1,9 @@
 // src/syscall.rs
 
+use x86_64::structures::paging::Size4KiB;
+
+use crate::mm::paging::create_user_address_space;
+
 unsafe extern "C" {
     fn syscall_entry_stub();
 }
@@ -119,6 +123,90 @@ core::arch::global_asm!(
     "sysretq",
 );
 
+pub fn sys_brk(requested_break: u64, process: &mut crate::process::process::Process) -> u64 {
+    if requested_break == 0 {
+        return process.program_break;
+    }
+    if requested_break < process.heap_start {
+        return process.program_break;
+    }
+    if requested_break >= process.stack_start {
+        return process.program_break;
+    }
+    const GUARD_PAGE_SIZE: u64 = 4096;
+    if requested_break >= process.stack_start.saturating_sub(GUARD_PAGE_SIZE) {
+        return process.program_break;
+    }
+
+    let old_break = process.program_break;
+    let old_page_end = crate::mm::allocator::align_to(old_break as usize, 4096) as u64;
+    let new_page_end = crate::mm::allocator::align_to(requested_break as usize, 4096) as u64;
+    let pml4_table = crate::mm::paging::active_level_4_table();
+
+    if new_page_end > old_page_end {
+        for page_addr in (old_page_end..new_page_end).step_by(4096) {
+            let frame = crate::mm::memory::allocate_zeroed_frame();
+            if frame.is_none() {
+                for page_addr_to_unmap in (old_page_end..page_addr).step_by(4096) {
+                    let virt_addr = x86_64::VirtAddr::new(page_addr_to_unmap);
+                    let page_to_unmap: x86_64::structures::paging::Page<Size4KiB> =
+                        x86_64::structures::paging::page::Page::containing_address(virt_addr);
+                    if let Some(freed_frame) = crate::mm::paging::unmap(page_to_unmap, pml4_table) {
+                        crate::mm::memory::clear_frame(
+                            freed_frame.start_address().as_u64() as usize
+                        );
+                    }
+                }
+                return old_break;
+            }
+            let frame = frame.unwrap();
+            let virt_addr = x86_64::VirtAddr::new(page_addr as u64);
+            let phys_addr = x86_64::PhysAddr::new(frame as u64);
+            let phys_frame = x86_64::structures::paging::PhysFrame::containing_address(phys_addr);
+
+            let page: x86_64::structures::paging::Page<Size4KiB> =
+                x86_64::structures::paging::page::Page::containing_address(virt_addr);
+            if let Err(_) = crate::mm::paging::map_to(
+                page,
+                phys_frame,
+                x86_64::structures::paging::PageTableFlags::PRESENT
+                    | x86_64::structures::paging::PageTableFlags::WRITABLE
+                    | x86_64::structures::paging::PageTableFlags::USER_ACCESSIBLE
+                    | x86_64::structures::paging::PageTableFlags::NO_EXECUTE,
+                pml4_table,
+            ) {
+                for page_addr_to_unmap in (old_page_end..page_addr).step_by(4096) {
+                    let virt_addr = x86_64::VirtAddr::new(page_addr_to_unmap);
+                    let page_to_unmap: x86_64::structures::paging::Page<Size4KiB> =
+                        x86_64::structures::paging::page::Page::containing_address(virt_addr);
+                    if let Some(freed_frame) = crate::mm::paging::unmap(page_to_unmap, pml4_table) {
+                        crate::mm::memory::clear_frame(
+                            freed_frame.start_address().as_u64() as usize
+                        );
+                    }
+                }
+                crate::mm::memory::clear_frame(frame);
+                return old_break;
+            }
+        }
+    } else if new_page_end < old_page_end {
+        for page_addr in (new_page_end..old_page_end).step_by(4096) {
+            let virt_addr = x86_64::VirtAddr::new(page_addr);
+            let page_to_unmap: x86_64::structures::paging::Page<Size4KiB> =
+                x86_64::structures::paging::page::Page::containing_address(virt_addr);
+            if let Some(freed_frame) = crate::mm::paging::unmap(page_to_unmap, pml4_table) {
+                crate::mm::memory::clear_frame(freed_frame.start_address().as_u64() as usize);
+            }
+        }
+    }
+
+    process.program_break = requested_break;
+    crate::process::process::CURRENT_BOUNDS
+        .program_break
+        .store(requested_break, core::sync::atomic::Ordering::Relaxed);
+    return requested_break;
+}
+
 /// The Rust-side syscall dispatch handler, called by the `syscall_entry` stub.
 ///
 /// The `syscall_entry` assembly stub (defined below via `global_asm!`) saves
@@ -147,6 +235,9 @@ pub extern "C" fn rust_syscall_handler(context: &mut crate::process::process::Th
 
     match syscall_no {
         // SYS_READ (0)
+        // arg1 (rdi) = file descriptor (1 is stdout)
+        // arg2 (rsi) = virtual address of buffer in user space
+        // arg3 (rdx) = length of buffer
         0 => {
             let fd = arg1 as usize;
             let buf_ptr = arg2 as *mut u8;
@@ -223,6 +314,7 @@ pub extern "C" fn rust_syscall_handler(context: &mut crate::process::process::Th
         }
 
         // SYS_OPEN (2)
+        // arg1 (rdi) = pointer to filename string
         2 => {
             let filename_ptr = arg1 as *const u8;
 
@@ -298,6 +390,8 @@ pub extern "C" fn rust_syscall_handler(context: &mut crate::process::process::Th
             crate::process::process::exit_thread();
         }
 
+        // SYS_BRK (12)
+        // arg1 (rdi) = requested break
         12 => {
             let requested_break = arg1;
 
@@ -313,16 +407,7 @@ pub extern "C" fn rust_syscall_handler(context: &mut crate::process::process::Th
                 .unwrap()
                 .as_mut()
                 .unwrap();
-
-            if requested_break == 0 || requested_break < process.heap_start {
-                context.rax = process.program_break;
-            } else {
-                process.program_break = requested_break;
-                context.rax = requested_break;
-                crate::process::process::CURRENT_BOUNDS
-                    .program_break
-                    .store(requested_break, core::sync::atomic::Ordering::Relaxed);
-            }
+            context.rax = sys_brk(requested_break, process);
         }
 
         // Unknown Syscall
