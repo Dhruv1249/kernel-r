@@ -74,7 +74,17 @@ impl Vnode for ConsoleVnode {
                         buf[..safe_len].copy_from_slice(&temp_array[..safe_len]);
                         return Some(safe_len);
                     }
-                    pc_keyboard::DecodedKey::RawKey(_) => continue,
+                    pc_keyboard::DecodedKey::RawKey(key) => match key {
+                        pc_keyboard::KeyCode::Backspace => {
+                            buf[0] = 0x08;
+                            return Some(1);
+                        }
+                        pc_keyboard::KeyCode::Return => {
+                            buf[0] = b'\n';
+                            return Some(1);
+                        }
+                        _ => continue,
+                    },
                 }
             }
         }
@@ -83,8 +93,8 @@ impl Vnode for ConsoleVnode {
     fn write(&self, _offset: usize, buf: &[u8]) -> Option<usize> {
         let s = unsafe { core::str::from_utf8_unchecked(buf) };
         crate::serial_print!("{}", s);
-        crate::println!("{}", s);
-        return Some(buf.len());
+        crate::print!("{}", s);
+        Some(buf.len())
     }
 
     fn lookup(&self, _name: &str) -> Option<alloc::sync::Arc<dyn Vnode>> {

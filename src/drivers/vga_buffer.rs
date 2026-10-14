@@ -97,6 +97,13 @@ impl Writer {
     pub fn write_byte(&mut self, byte: u8) {
         match byte {
             b'\n' => self.new_line(),
+            b'\r' => self.column_position = 0,
+            0x08 => {
+                if self.column_position > 0 {
+                    self.column_position -= 1;
+                }
+            }
+            0x0c => self.clear(),
             byte => {
                 if self.column_position >= BUFFER_WIDTH {
                     self.new_line();
@@ -149,18 +156,19 @@ impl Writer {
         for row in 0..BUFFER_HEIGHT {
             self.clear_row(row);
         }
+        self.column_position = 0;
     }
 
-    /// Writes a UTF-8 string to the VGA buffer, replacing non-ASCII bytes with `■` (`0xFE`).
-    ///
-    /// Only bytes in the printable ASCII range `0x20–0x7E` and newlines are
-    /// written verbatim.  Everything else (e.g., multi-byte UTF-8 continuation
-    /// bytes) is replaced with the VGA `■` glyph (`0xFE`) so the screen
-    /// always shows something meaningful.
+    /// Writes a UTF-8 string to the VGA buffer.
     pub fn write_string(&mut self, s: &str) {
+        if s == "\x1b[2J\x1b[H" || s == "\x1b[2J" {
+            self.clear();
+            return;
+        }
+
         for byte in s.bytes() {
             match byte {
-                b'\n' => self.new_line(),
+                b'\n' | b'\r' | 0x08 | 0x0c => self.write_byte(byte),
                 // Print only if the byte is in ascii range
                 // i.e 32 to 126
                 0x20..=0x7e => self.write_byte(byte),
