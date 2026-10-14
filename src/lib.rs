@@ -108,8 +108,12 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
     crate::arch::x86_64::gdt::init();
     crate::interrupts::interrupt::load_idt();
 
-    // Clear the screen
-    crate::drivers::vga_buffer::WRITER.lock().clear();
+    // Clear the screen and enable hardware cursor
+    {
+        let mut writer = crate::drivers::vga_buffer::WRITER.lock();
+        writer.enable_cursor(14, 15);
+        writer.clear();
+    }
 
     // Phyiscal offset
     let phy_offset = crate::mm::paging::PHYS_OFFSET;

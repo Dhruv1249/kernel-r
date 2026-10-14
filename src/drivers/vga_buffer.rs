@@ -157,6 +157,47 @@ impl Writer {
             self.clear_row(row);
         }
         self.column_position = 0;
+        self.update_cursor();
+    }
+
+    /// Moves the hardware VGA text-mode cursor to the current position.
+    pub fn update_cursor(&self) {
+        let row = BUFFER_HEIGHT - 1;
+        let col = self.column_position;
+        let pos = (row * BUFFER_WIDTH + col) as u16;
+
+        unsafe {
+            use x86_64::instructions::port::Port;
+            let mut crtc_idx = Port::<u8>::new(0x3D4);
+            let mut crtc_data = Port::<u8>::new(0x3D5);
+
+            // Cursor Location High Register (0x0E)
+            crtc_idx.write(0x0E);
+            crtc_data.write(((pos >> 8) & 0xFF) as u8);
+
+            // Cursor Location Low Register (0x0F)
+            crtc_idx.write(0x0F);
+            crtc_data.write((pos & 0xFF) as u8);
+        }
+    }
+
+    /// Enables the hardware text-mode blinking cursor with underscore shape.
+    pub fn enable_cursor(&self, start_scanline: u8, end_scanline: u8) {
+        unsafe {
+            use x86_64::instructions::port::Port;
+            let mut crtc_idx = Port::<u8>::new(0x3D4);
+            let mut crtc_data = Port::<u8>::new(0x3D5);
+
+            crtc_idx.write(0x0A);
+            let cur = crtc_data.read();
+            crtc_idx.write(0x0A);
+            crtc_data.write((cur & 0xC0) | (start_scanline & 0x1F));
+
+            crtc_idx.write(0x0B);
+            let cur2 = crtc_data.read();
+            crtc_idx.write(0x0B);
+            crtc_data.write((cur2 & 0xE0) | (end_scanline & 0x1F));
+        }
     }
 
     /// Writes a UTF-8 string to the VGA buffer.
@@ -176,6 +217,7 @@ impl Writer {
                 _ => self.write_byte(0xfe),
             }
         }
+        self.update_cursor();
     }
 }
 
