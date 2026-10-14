@@ -664,6 +664,9 @@ pub extern "C" fn monitor_task() {
     } else {
         crate::serial_println!("WARNING: Memory leak detected! Delta: {} MB", leak_delta);
     }
+
+    crate::serial_println!("Spawning interactive shell (sh.elf)...");
+    crate::process::process::spawn_from_vfs("sh.elf", 1024, 0);
     
     crate::process::process::exit_thread();
 }

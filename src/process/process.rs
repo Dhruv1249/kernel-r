@@ -681,6 +681,24 @@ pub extern "C" fn rust_timer_handler(
 ) -> *mut ThreadContext {
     // Update the system uptime
     update_system_uptime();
+
+    // Poll serial port (COM1 0x3F8) for input from terminal/QEMU stdio
+    unsafe {
+        use x86_64::instructions::port::PortReadOnly;
+        let lsr: u8 = PortReadOnly::<u8>::new(0x3FD).read();
+        if lsr & 1 != 0 {
+            let byte: u8 = PortReadOnly::<u8>::new(0x3F8).read();
+            let key = if byte == b'\r' {
+                pc_keyboard::DecodedKey::Unicode('\n')
+            } else if byte == 127 || byte == 8 {
+                pc_keyboard::DecodedKey::Unicode('\x08')
+            } else {
+                pc_keyboard::DecodedKey::Unicode(byte as char)
+            };
+            crate::drivers::keyboard::KEYBOARD_MAILBOX.send(key);
+        }
+    }
+
     // Tell the APIC we received the interrupt
     crate::interrupts::apic::LOCAL_APIC
         .lock()

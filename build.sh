@@ -39,6 +39,7 @@ nasm -f elf64 src/boot.asm -o target/boot.o
 clang -target x86_64-unknown-none -ffreestanding -mno-red-zone -c src/rbtree.c -o target/rbtree.o
 clang -target x86_64-unknown-none -ffreestanding -nostdlib -static src/dummy.c -o target/dummy.elf
 clang -target x86_64-unknown-none -ffreestanding -nostdlib -static src/child.c -o target/child.elf
+clang -target x86_64-unknown-none -ffreestanding -nostdlib -static src/sh.c -o target/sh.elf
 
 # Build the kernel
 if [ "$istest" -eq 1 ]; then
@@ -56,7 +57,7 @@ mkdir -p iso/boot/grub
 
 
 echo "Hello from the virtual filesystem!" > target/test_file.txt
-tar --format=ustar -cf target/initramfs.tar -C target test_file.txt dummy.elf child.elf
+tar --format=ustar -cf target/initramfs.tar -C target test_file.txt dummy.elf child.elf sh.elf
 
 # Copy kernel ELF and initramfs 
 cp target/kernel.elf iso/boot/kernel.elf
