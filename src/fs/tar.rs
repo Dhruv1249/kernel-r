@@ -89,6 +89,23 @@ impl crate::fs::vfs::Vnode for TarDirectory {
         }
         None
     }
+
+    fn readdir(&self, index: usize) -> Option<crate::fs::vfs::DirEntry> {
+        if let Some(file) = self.files.get(index) {
+            let mut name_buf = [0u8; 64];
+            let bytes = file.name.as_bytes();
+            let len = core::cmp::min(bytes.len(), 63);
+            name_buf[..len].copy_from_slice(&bytes[..len]);
+            Some(crate::fs::vfs::DirEntry {
+                size: file.size as u64,
+                entry_type: 1, // File
+                name_len: len as u8,
+                name: name_buf,
+            })
+        } else {
+            None
+        }
+    }
 }
 
 

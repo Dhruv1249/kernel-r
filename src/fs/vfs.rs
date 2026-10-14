@@ -7,6 +7,15 @@ pub enum VnodeType {
 
 pub static ROOT_FS: spin::Mutex<Option<alloc::sync::Arc<dyn Vnode>>> = spin::Mutex::new(None);
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct DirEntry {
+    pub size: u64,
+    pub entry_type: u8, // 1 = File, 2 = Directory, 3 = CharacterDevice
+    pub name_len: u8,
+    pub name: [u8; 64],
+}
+
 /// The core trait that all filesystems must implement.
 pub trait Vnode: Send + Sync {
     fn vtype(&self) -> VnodeType;
@@ -22,6 +31,11 @@ pub trait Vnode: Send + Sync {
 
     /// For directories: looks up a child node by name.
     fn lookup(&self, name: &str) -> Option<alloc::sync::Arc<dyn Vnode>>;
+
+    /// For directories: enumerates child entry at the given index.
+    fn readdir(&self, _index: usize) -> Option<DirEntry> {
+        None
+    }
 }
 
 /// Represents an opened file and its current state (like the read/write offset).

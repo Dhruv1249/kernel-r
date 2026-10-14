@@ -497,6 +497,10 @@ pub extern "C" fn _start(multiboot_info_addr: usize, grub_magic_number: usize) -
 
     let process_0 = crate::process::process::Process {
         pid: 0,
+        ppid: 0,
+        exit_code: None,
+        is_zombie: false,
+        wait_queue: crate::sync::sync::WaitQueue::new(),
         page_table: kernel_cr3_phys,
         heap_start: 0,
         program_break: 0,

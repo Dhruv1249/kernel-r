@@ -2,7 +2,6 @@
 
 use x86_64::structures::paging::Size4KiB;
 
-use crate::mm::paging::create_user_address_space;
 
 unsafe extern "C" {
     fn syscall_entry_stub();
@@ -229,9 +228,9 @@ pub extern "C" fn rust_syscall_handler(context: &mut crate::process::process::Th
     let arg1 = context.rdi;
     let arg2 = context.rsi;
     let arg3 = context.rdx;
-    let arg4 = context.r10;
-    let arg5 = context.r8;
-    let arg6 = context.r9;
+    let _arg4 = context.r10;
+    let _arg5 = context.r8;
+    let _arg6 = context.r9;
 
     match syscall_no {
         // SYS_READ (0)
@@ -381,13 +380,218 @@ pub extern "C" fn rust_syscall_handler(context: &mut crate::process::process::Th
             }
         }
 
+        // SYS_CLOSE (3)
+        // arg1 (rdi) = file descriptor
+        3 => {
+            let fd = arg1 as usize;
+            if fd >= crate::process::process::MAX_FDS {
+                context.rax = (!(9u64)).wrapping_add(1); // -EBADF
+            } else {
+                let mut sched = crate::process::process::SCHEDULER.lock();
+                let current_task_id = sched.current_task.expect("FATAL: No current task!");
+                let pid = sched.tasks.get_mut(current_task_id).unwrap().pid;
+                let process = sched.processes.get_mut(pid as usize).unwrap().as_mut().unwrap();
+
+                if process.fd_table[fd].take().is_some() {
+                    context.rax = 0; // Success
+                } else {
+                    context.rax = (!(9u64)).wrapping_add(1); // -EBADF
+                }
+            }
+        }
+
+        // SYS_SPAWN (59)
+        // arg1 (rdi) = pointer to null-terminated filename string
+        // arg2 (rsi) = optional pointer to argv (unused for now)
+        59 => {
+            let filename_ptr = arg1 as *const u8;
+            if (filename_ptr as u64) >= 0x8000_0000 || (filename_ptr as u64) < 0x1000 {
+                context.rax = (!(14u64)).wrapping_add(1); // -EFAULT
+            } else {
+                let mut len = 0;
+                unsafe {
+                    for i in 0..256 {
+                        if *(filename_ptr.add(i)) == 0 {
+                            len = i;
+                            break;
+                        }
+                    }
+                }
+
+                if len == 0 {
+                    context.rax = (!(2u64)).wrapping_add(1); // -ENOENT
+                } else {
+                    let slice = unsafe { core::slice::from_raw_parts(filename_ptr, len) };
+                    if let Ok(filename) = core::str::from_utf8(slice) {
+                        let current_pid = {
+                            let sched = crate::process::process::SCHEDULER.lock();
+                            let current_task_id =
+                                sched.current_task.expect("FATAL: No current task!");
+                            sched.tasks.get(current_task_id).unwrap().pid
+                        };
+
+                        if let Some(child_pid) =
+                            crate::process::process::spawn_from_vfs(filename, 1024, current_pid)
+                        {
+                            context.rax = child_pid;
+                        } else {
+                            context.rax = (!(2u64)).wrapping_add(1); // -ENOENT
+                        }
+                    } else {
+                        context.rax = (!(2u64)).wrapping_add(1); // -ENOENT (Bad UTF-8)
+                    }
+                }
+            }
+        }
+
         // SYS_EXIT (60)
         // arg1 (rdi) = exit code
         60 => {
-            let exit_code = arg1;
+            let exit_code = arg1 as i32;
             crate::serial_println!("User thread exited with code: {}", exit_code);
 
+            {
+                let mut sched = crate::process::process::SCHEDULER.lock();
+                let current_task_id = sched.current_task.expect("FATAL: No current task!");
+                let pid = sched.tasks.get_mut(current_task_id).unwrap().pid;
+
+                let mut parent_queue_ptr: Option<*const crate::sync::sync::WaitQueue> = None;
+                if let Some(Some(proc)) = sched.processes.get_mut(pid as usize) {
+                    proc.exit_code = Some(exit_code);
+                    proc.is_zombie = true;
+                    let ppid = proc.ppid;
+                    if let Some(Some(parent)) = sched.processes.get(ppid as usize) {
+                        parent_queue_ptr = Some(&parent.wait_queue as *const _);
+                    }
+                }
+
+                // Reparent any child processes to init (PID 0)
+                for slot in sched.processes.iter_mut() {
+                    if let Some(child) = slot {
+                        if child.ppid == pid {
+                            child.ppid = 0;
+                        }
+                    }
+                }
+
+                // Wake parent waiting on this child
+                if let Some(queue_ptr) = parent_queue_ptr {
+                    unsafe {
+                        (*queue_ptr).wake_all(&mut *sched);
+                    }
+                }
+            }
+
             crate::process::process::exit_thread();
+        }
+
+        // SYS_WAIT (61)
+        // arg1 (rdi) = target PID (-1 for any child, or >0 for specific child)
+        // arg2 (rsi) = pointer to i32 status output (can be NULL)
+        61 => {
+            let target_pid = arg1 as i64;
+            let status_ptr = arg2 as *mut i32;
+
+            loop {
+                let mut sched = crate::process::process::SCHEDULER.lock();
+                let current_task_id = sched.current_task.expect("FATAL: No current task!");
+                let current_pid = sched.tasks.get_mut(current_task_id).unwrap().pid;
+
+                let mut child_found = false;
+                let mut zombie_child: Option<(u64, i32, u64)> = None;
+
+                for slot in sched.processes.iter() {
+                    if let Some(p) = slot {
+                        if p.ppid == current_pid {
+                            if target_pid == -1 || target_pid as u64 == p.pid {
+                                child_found = true;
+                                if p.is_zombie {
+                                    zombie_child =
+                                        Some((p.pid, p.exit_code.unwrap_or(0), p.page_table));
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if !child_found {
+                    // No such child process exists
+                    context.rax = (!(10u64)).wrapping_add(1); // -ECHILD
+                    break;
+                }
+
+                if let Some((child_pid, exit_code, page_table)) = zombie_child {
+                    // Harvest the zombie child!
+                    sched.processes[child_pid as usize] = None;
+                    drop(sched);
+
+                    // Destroy child address space
+                    crate::mm::paging::destroy_user_address_space(page_table);
+
+                    // Write exit status if pointer was provided
+                    if !status_ptr.is_null() && (status_ptr as u64) < 0x8000_0000 {
+                        unsafe {
+                            *status_ptr = exit_code;
+                        }
+                    }
+
+                    context.rax = child_pid;
+                    break;
+                }
+
+                // Child is still alive, sleep on parent's wait queue
+                let queue_ptr: *const crate::sync::sync::WaitQueue = {
+                    let parent = sched
+                        .processes
+                        .get(current_pid as usize)
+                        .unwrap()
+                        .as_ref()
+                        .unwrap();
+                    &parent.wait_queue as *const _
+                };
+
+                let current_task = sched.tasks.get_mut(current_task_id).unwrap();
+                current_task.state = crate::process::process::ThreadState::Blocked;
+
+                unsafe {
+                    let mut state = (*queue_ptr).state.lock();
+                    state.waiters.push_back(current_task_id);
+                }
+
+                drop(sched);
+
+                x86_64::instructions::interrupts::enable();
+                unsafe {
+                    core::arch::asm!("int 0x20");
+                }
+            }
+        }
+
+        // SYS_GETDENTS (78)
+        // arg1 (rdi) = entry index (0, 1, 2, ...)
+        // arg2 (rsi) = pointer to DirEntry in user space
+        78 => {
+            let index = arg1 as usize;
+            let buf_ptr = arg2 as *mut crate::fs::vfs::DirEntry;
+
+            if (buf_ptr as u64) >= 0x8000_0000 || (buf_ptr as u64) < 0x1000 {
+                context.rax = (!(14u64)).wrapping_add(1); // -EFAULT
+            } else {
+                let root_lock = crate::fs::vfs::ROOT_FS.lock();
+                if let Some(root_dir) = root_lock.as_ref() {
+                    if let Some(entry) = root_dir.readdir(index) {
+                        unsafe {
+                            core::ptr::write(buf_ptr, entry);
+                        }
+                        context.rax = 1; // 1 entry returned
+                    } else {
+                        context.rax = 0; // EOF (no more entries)
+                    }
+                } else {
+                    context.rax = (!(2u64)).wrapping_add(1); // -ENOENT
+                }
+            }
         }
 
         // SYS_BRK (12)

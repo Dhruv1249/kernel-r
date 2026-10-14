@@ -66,6 +66,10 @@ pub const MAX_FDS: usize = 1024;
 /// between threads belonging to different processes the scheduler reloads CR3.
 pub struct Process {
     pub pid: u64,
+    pub ppid: u64,
+    pub exit_code: Option<i32>,
+    pub is_zombie: bool,
+    pub wait_queue: crate::sync::sync::WaitQueue,
     pub page_table: u64,
     pub heap_start: u64,
     pub program_break: u64,
@@ -185,6 +189,15 @@ impl ThreadArena {
                 self.slots[pid] = slot;
                 None
             }
+        }
+    }
+
+    /// Safely fetch a reference to a task by ID
+    pub fn get(&self, pid: usize) -> Option<&Thread> {
+        if let Some(ThreadSlot::Occupied(task)) = self.slots.get(pid) {
+            Some(&*task)
+        } else {
+            None
         }
     }
 
@@ -329,9 +342,13 @@ impl Scheduler {
             if zombie_id != self.current_task {
                 if let Some(dead_thread) = self.tasks.remove(zombie_id.unwrap()) {
                     let pid = dead_thread.pid as usize;
-                    if let Some(process_box) = self.processes[pid].take() {
-                        let pml4_phys = process_box.page_table;
-                        crate::mm::paging::destroy_user_address_space(pml4_phys);
+                    if let Some(process_box) = self.processes.get(pid).and_then(|p| p.as_ref()) {
+                        if process_box.ppid == 0 {
+                            if let Some(dead_process) = self.processes[pid].take() {
+                                let pml4_phys = dead_process.page_table;
+                                crate::mm::paging::destroy_user_address_space(pml4_phys);
+                            }
+                        }
                     }
                 }
             } else {
@@ -751,7 +768,7 @@ pub fn join(target_tid: usize) {
 // src/process/process.rs
 
 /// Spawns a user-mode process in its own isolated address space.
-pub fn spawn_user_process(elf_data: &[u8], weight: u64) -> usize {
+pub fn spawn_user_process(elf_data: &[u8], weight: u64, ppid: u64) -> u64 {
     let elf = xmas_elf::ElfFile::new(elf_data).expect("Failed to parse ELF");
     let entry_point = elf.header.pt2.entry_point();
 
@@ -855,24 +872,49 @@ pub fn spawn_user_process(elf_data: &[u8], weight: u64) -> usize {
     let mut fd_table: [Option<alloc::sync::Arc<spin::Mutex<crate::fs::vfs::OpenFile>>>; MAX_FDS] =
         [const { None }; MAX_FDS];
 
-    fd_table[0] = Some(console_file.clone());
-    fd_table[1] = Some(console_file.clone());
-    fd_table[2] = Some(console_file.clone());
-
     let mut sched = SCHEDULER.lock();
 
-    let pid = sched.processes.len() as u64;
+    if ppid > 0 {
+        if let Some(Some(parent)) = sched.processes.get(ppid as usize) {
+            for i in 0..MAX_FDS {
+                fd_table[i] = parent.fd_table[i].clone();
+            }
+        } else {
+            fd_table[0] = Some(console_file.clone());
+            fd_table[1] = Some(console_file.clone());
+            fd_table[2] = Some(console_file.clone());
+        }
+    } else {
+        fd_table[0] = Some(console_file.clone());
+        fd_table[1] = Some(console_file.clone());
+        fd_table[2] = Some(console_file.clone());
+    }
+
+    let pid = if let Some(free_idx) = sched.processes.iter().position(|p| p.is_none()) {
+        free_idx as u64
+    } else {
+        sched.processes.len() as u64
+    };
+
     let process = Process {
         pid,
+        ppid,
+        exit_code: None,
+        is_zombie: false,
+        wait_queue: crate::sync::sync::WaitQueue::new(),
         page_table: user_pml4.as_u64(),
         heap_start: initial_heap_start as u64,
         stack_start: stack_bottom,
         stack_end: stack_top,
         program_break: initial_heap_start as u64,
-        fd_table: fd_table,
+        fd_table,
     };
 
-    sched.processes.push(Some(alloc::boxed::Box::new(process)));
+    if (pid as usize) < sched.processes.len() {
+        sched.processes[pid as usize] = Some(alloc::boxed::Box::new(process));
+    } else {
+        sched.processes.push(Some(alloc::boxed::Box::new(process)));
+    }
 
     let mut thread =
         crate::process::process::Thread::new(&mut sched, user_mode_trampoline as u64, weight);
@@ -884,8 +926,8 @@ pub fn spawn_user_process(elf_data: &[u8], weight: u64) -> usize {
 
     thread.pid = pid;
 
-    let tid = sched.add_task(thread);
-    return tid;
+    let _tid = sched.add_task(thread);
+    pid
 }
 
 /// A tiny kernel thread that drops privileges and jumps to user space.
@@ -897,12 +939,20 @@ pub extern "C" fn user_mode_trampoline(enty_point: u64) {
     }
 }
 
-/// Reads an ELF file from the VFS and spawns it as a new user process.
-pub fn exec_from_vfs(filename: &str, weight: u64) -> Option<usize> {
+/// Reads an ELF file from the VFS and spawns it as a new user process with a given parent PID.
+pub fn spawn_from_vfs(filename: &str, weight: u64, ppid: u64) -> Option<u64> {
+    let clean_name = if let Some(stripped) = filename.strip_prefix("./") {
+        stripped
+    } else if let Some(stripped) = filename.strip_prefix('/') {
+        stripped
+    } else {
+        filename
+    };
+
     let root_lock = crate::fs::vfs::ROOT_FS.lock();
 
     if let Some(root_dir) = root_lock.as_ref() {
-        if let Some(file) = root_dir.lookup(filename) {
+        if let Some(file) = root_dir.lookup(clean_name) {
             let file_size: usize = file.size();
             let mut buffer = alloc::vec![0; file_size];
 
@@ -914,11 +964,16 @@ pub fn exec_from_vfs(filename: &str, weight: u64) -> Option<usize> {
                 return None;
             }
 
-            return Some(crate::process::process::spawn_user_process(&buffer, weight));
+            return Some(crate::process::process::spawn_user_process(&buffer, weight, ppid));
         }
     }
 
     None
+}
+
+/// Reads an ELF file from the VFS and spawns it as a new user process (ppid = 0).
+pub fn exec_from_vfs(filename: &str, weight: u64) -> Option<usize> {
+    spawn_from_vfs(filename, weight, 0).map(|pid| pid as usize)
 }
 
 // Global asm so rust knows how to call this function and doesn't mess with the stack
